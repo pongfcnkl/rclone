@@ -491,7 +491,8 @@ func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs,
 		select {
 		case <-ctx.Done():
 			return
-		case pair, ok := <-in.Get(ctx):
+		default:
+			pair, ok := in.Get(ctx)
 			if !ok {
 				return
 			}
