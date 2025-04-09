@@ -230,7 +230,7 @@ jobs:
             export CC=/usr/bin/x86_64-w64-mingw32-gcc
             
             go version  # 检查 Go 版本
-            go build -v $(echo $BUILD_FLAGS) -tags "$GOTAGS" $(echo $BUILD_ARGS) -o rclone.exe
+            go build -o rclone.exe
       
             # 创建输出目录并打包
             mkdir -p build
@@ -280,7 +280,7 @@ jobs:
           RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
         # working-directory: '$(modulePath)'
         # Deploy binaries if enabled in config && not a PR && not a fork
-        if: matrix.deploy && github.head_ref == '' && github.repository == 'wiserain/rclone'
+        if: matrix.deploy && github.head_ref == '' && github.repository == 'pongfcnkl/rclone'
       - 
         if: ${{ contains(github.ref, 'refs/tags/') }}
         name: Upload Release Artifact
@@ -302,7 +302,7 @@ jobs:
             build/*arm64.zip
 
   # lint:
-  #   if: inputs.manual || (github.repository == 'wiserain/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
+  #   if: inputs.manual || (github.repository == 'pongfcnkl/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
   #   timeout-minutes: 30
   #   name: "lint"
   #   runs-on: ubuntu-latest
@@ -483,7 +483,7 @@ jobs:
       - create-release
     timeout-minutes: 60
     runs-on: ubuntu-latest
-    if: github.head_ref == '' && github.repository == 'wiserain/rclone'
+    if: github.head_ref == '' && github.repository == 'pongfcnkl/rclone'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -515,11 +515,11 @@ jobs:
         if: github.event_name == 'push' && contains(github.ref, 'refs/heads/')
         shell: bash
         run: |
-          sed -i -r "s/^TERMUX_PKG_MAINTAINER=(.*)$/TERMUX_PKG_MAINTAINER=\"@wiserain\"/g" packages/rclone/build.sh
+          sed -i -r "s/^TERMUX_PKG_MAINTAINER=(.*)$/TERMUX_PKG_MAINTAINER=\"@pongfcnkl\"/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_VERSION=(.*)$/TERMUX_PKG_VERSION=\"${{ env.version }}\"/g" packages/rclone/build.sh
           grep -q "^TERMUX_PKG_REVISION" packages/rclone/build.sh || sed -i "/^TERMUX_PKG_VERSION=/a TERMUX_PKG_REVISION=0" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_REVISION=(.*)$/TERMUX_PKG_REVISION=${{ env.revision }}/g" packages/rclone/build.sh
-          sed -i -r "s/^TERMUX_PKG_SRCURL=(.*)$/TERMUX_PKG_SRCURL=git+https:\/\/github.com\/wiserain\/rclone/g" packages/rclone/build.sh
+          sed -i -r "s/^TERMUX_PKG_SRCURL=(.*)$/TERMUX_PKG_SRCURL=git+https:\/\/github.com\/pongfcnkl\/rclone/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_SHA256=(.*)$/TERMUX_PKG_GIT_BRANCH=${{ env.branch }}/g" packages/rclone/build.sh
           sed -i -r "s/-ldflags \"(.*)\"/-ldflags \"-s -X github.com\/rclone\/rclone\/fs.Version=${{ env.version_all }}\"/g" packages/rclone/build.sh
           sed -i -r "s/cp rclone.1 (.*)/cp rclone.1 \1\n\tzip \$HOME\/termux-packages\/output\/rclone-${{ env.version_all }}-termux-\$TERMUX_ARCH.zip rclone/g" packages/rclone/build.sh
@@ -532,11 +532,11 @@ jobs:
         if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          sed -i -r "s/^TERMUX_PKG_MAINTAINER=(.*)$/TERMUX_PKG_MAINTAINER=\"@wiserain\"/g" packages/rclone/build.sh
+          sed -i -r "s/^TERMUX_PKG_MAINTAINER=(.*)$/TERMUX_PKG_MAINTAINER=\"@pongfcnkl\"/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_VERSION=(.*)$/TERMUX_PKG_VERSION=\"${{ env.version }}\"/g" packages/rclone/build.sh
           grep -q "^TERMUX_PKG_REVISION" packages/rclone/build.sh || sed -i "/^TERMUX_PKG_VERSION=/a TERMUX_PKG_REVISION=0" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_REVISION=(.*)$/TERMUX_PKG_REVISION=${{ env.revision }}/g" packages/rclone/build.sh
-          sed -i -r "s/^TERMUX_PKG_SRCURL=(.*)$/TERMUX_PKG_SRCURL=git+https:\/\/github.com\/wiserain\/rclone/g" packages/rclone/build.sh
+          sed -i -r "s/^TERMUX_PKG_SRCURL=(.*)$/TERMUX_PKG_SRCURL=git+https:\/\/github.com\/pongfcnkl\/rclone/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_SHA256=(.*)$/TERMUX_PKG_GIT_BRANCH=${{ env.branch }}/g" packages/rclone/build.sh
           sed -i -r "s/-ldflags \"(.*)\"/-ldflags \"-s -X github.com\/rclone\/rclone\/fs.Version=${{ env.version_all }}\"/g" packages/rclone/build.sh
           sed -i -r "s/cp rclone.1 (.*)/cp rclone.1 \1\n\tzip \$HOME\/termux-packages\/output\/rclone-${{ env.version_all }}-termux-\$TERMUX_ARCH.zip rclone/g" packages/rclone/build.sh
