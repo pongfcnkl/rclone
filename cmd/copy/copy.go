@@ -14,12 +14,14 @@ import (
 
 var (
 	createEmptySrcDirs = false
+	deleteAfterCopy    = false
 )
 
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
 	flags.BoolVarP(cmdFlags, &createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after copy", "")
+	flags.BoolVarP(cmdFlags, &deleteAfterCopy, "delete-after-copy", "", deleteAfterCopy, "Delete source files after successful copy", "")
 }
 
 var commandDefinition = &cobra.Command{
@@ -78,6 +80,7 @@ recently very efficiently like this:
 
     rclone copy --max-age 24h --no-traverse /path/to/src remote:
 
+Use the |--delete-after-copy| flag to delete source files after successful copy.
 
 Rclone will sync the modification times of files and directories if
 the backend supports it. If metadata syncing is required then use the
@@ -95,7 +98,6 @@ for more info.
 		"groups": "Copy,Filter,Listing,Important",
 	},
 	Run: func(command *cobra.Command, args []string) {
-
 		cmd.CheckArgs(2, 2, command, args)
 		fsrc, srcFileName, fdst := cmd.NewFsSrcFileDst(args)
 		// mod
@@ -104,9 +106,17 @@ for more info.
 		}
 		cmd.Run(true, true, command, func() error {
 			if srcFileName == "" {
-				return sync.CopyDir(context.Background(), fdst, fsrc, createEmptySrcDirs)
+				err := sync.CopyDir(context.Background(), fdst, fsrc, createEmptySrcDirs)
+				if err == nil && deleteAfterCopy {
+					return operations.DeleteDir(context.Background(), fsrc)
+				}
+				return err
 			}
-			return operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
+			err := operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
+			if err == nil && deleteAfterCopy {
+				return operations.DeleteFile(context.Background(), fsrc, srcFileName)
+			}
+			return err
 		})
 	},
 }
