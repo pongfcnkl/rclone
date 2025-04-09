@@ -483,7 +483,8 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
             }
 
             // Move the file
-            in := tr.Account(ctx, nil) // 获取 accounting.Account
+            in := tr.Account(ctx, nil)
+            // 获取 accounting.Account
             newDst, err = doMove(ctx, src, remote)
             if err != nil {
                 fs.Errorf(src, "Couldn't move: %v", err)
@@ -491,7 +492,7 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
             }
             if newDst != nil {
                 // 修正这一行
-                in.AccounSize(newDst.Size()) // 或者根据实际API使用正确的方法
+                in.SetSize(newDst.Size())
             }
             return newDst, nil
         }
