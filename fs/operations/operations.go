@@ -443,7 +443,7 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
         return newDst, nil
     }
     // 检查环境变量
-    moveRm := os.Getenv("move-rm")
+    moveRm := os.Getenv("MoveRm")
     if moveRm == "true" {
         // 不移动只删除重复文件
         if dst != nil && !SameObject(src, dst) {
