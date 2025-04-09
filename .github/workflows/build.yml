@@ -22,7 +22,7 @@ on:
 jobs:
   create-release:
     runs-on: ubuntu-latest
-    if: github.head_ref == '' && github.repository == 'wiserain/rclone'
+    if: github.head_ref == '' && github.repository == 'pongfcnkl/rclone'
     outputs:
       upload_url: ${{ steps.set_upload_url.outputs.upload_url }}
     steps:
@@ -39,7 +39,7 @@ jobs:
 
             ## How to Update
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/wiserain/rclone/mod/install.sh | sudo bash 
+            curl -fsSL https://raw.githubusercontent.com/pongfcnkl/rclone/mod/install.sh | sudo bash 
             ```
           draft: true
           prerelease: false
@@ -53,7 +53,7 @@ jobs:
   build:
     needs:
       - create-release
-    if: inputs.manual || (github.repository == 'wiserain/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
+    if: inputs.manual || (github.repository == 'pongfcnkl/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
     timeout-minutes: 60
     strategy:
       fail-fast: false
