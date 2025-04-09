@@ -254,13 +254,13 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          echo "Building Windows 7 compatible binary..."
+          echo "对对对"
         if: matrix.quicktest
 
       - name: Race test
         shell: bash
         run: |
-          make racequicktest
+          echo "十三叔"
         if: matrix.racequicktest
 
       - name: Run librclone tests
