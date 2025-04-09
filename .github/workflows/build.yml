@@ -219,9 +219,11 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.job_name }}" == "windows_7" ]]; then
-            wget https://github.com/XTLS/go-win7/releases/download/patched-1.24.2/go-for-win7-linux-amd64.zip
-            unzip go-for-win7-linux-amd64.zip
-            export PATH=$PWD/go/bin:$PATH
+            curl -L https://github.com/XTLS/go-win7/releases/download/patched-1.24.1/go-for-win7-linux-amd64.zip -o go-win7.zip
+            unzip -q go-win7.zip -d go-win7
+            chmod +x go-win7/bin/go
+            export PATH=$PWD/go-win7/bin:$PATH
+            echo "Building Windows 7 compatible binary..."
             export GOOS=windows
             export GOARCH=amd64
             export CGO_ENABLED=1
