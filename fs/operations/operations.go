@@ -439,10 +439,9 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
     }()
     newDst = dst
     if SkipDestructive(ctx, src, "move") {
-        tr.DryRun(src.Size())
+        tr.Reset() // Instead of DryRun
         return newDst, nil
     }
-
     // 检查环境变量
     moveRm := os.Getenv("move-rm")
     if moveRm == "true" {
@@ -486,7 +485,7 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
                 return newDst, err
             }
             if newDst != nil {
-                tr.Account(ctx, newDst.Size())
+                tr.Set(newDst.Size())
             }
             return newDst, nil
         }
