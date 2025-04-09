@@ -50,6 +50,48 @@ jobs:
           if [ "${{ contains(github.ref, 'refs/tags/') }}" = "true" ]; then
             echo "upload_url=${{ steps.new_release.outputs.upload_url }}" >> "$GITHUB_OUTPUT"
           fi
+  
+  build-armv7l:
+    needs:
+      - create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '>=1.23.0-rc.1'
+
+      - name: Download armv7l cross compiler
+        run: |
+          wget https://musl.cc/armv7l-linux-musleabihf-cross.tgz
+          tar xf armv7l-linux-musleabihf-cross.tgz
+
+      - name: Build rclone for armv7l
+        env:
+          CC: ${{ github.workspace }}/armv7l-linux-musleabihf-cross/bin/armv7l-linux-musleabihf-gcc
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: arm
+          GOARM: 7
+        run: |
+          go build -v -trimpath -ldflags "-s -X github.com/rclone/rclone/fs.Version=$(make version)" -o rclone-armv7l
+
+      - name: Package armv7l binary
+        run: |
+          mkdir -p build/armv7l
+          zip -j build/armv7l/rclone-armv7l.zip rclone-armv7l
+
+      - name: Upload armv7l artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rclone-armv7l
+          path: build/armv7l/rclone-armv7l.zip
+          
   build:
     needs:
       - create-release
@@ -213,7 +255,7 @@ jobs:
           make vars
           printf "\n\nSystem environment:\n\n"
           env
-
+      
       
       - name: Build rclone
         shell: bash
@@ -595,7 +637,7 @@ jobs:
 
   upload-release:
     if: ${{ contains(github.ref, 'refs/tags/') }}
-    needs: [create-release, build, termux]
+    needs: [create-release, build, termux, build-armv7l]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
