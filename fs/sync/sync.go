@@ -30,6 +30,9 @@ var ErrorMaxDurationReached = errors.New("max transfer duration reached as set b
 // duration limit is reached.
 var ErrorMaxDurationReachedFatal = fserrors.FatalError(ErrorMaxDurationReached)
 
+// CopyCallback is a function that is called after each file is successfully copied
+type CopyCallback func(obj fs.Object) error
+
 type syncCopyMove struct {
 	// parameters
 	fdst               fs.Fs
@@ -39,6 +42,7 @@ type syncCopyMove struct {
 	copyEmptySrcDirs   bool
 	deleteEmptySrcDirs bool
 	dir                string
+	copyCallback       CopyCallback // callback after each file is copied
 	// internal state
 	ci                     *fs.ConfigInfo         // global config
 	fi                     *filter.Filter         // filter config
@@ -125,7 +129,7 @@ func (strategy trackRenamesStrategy) leaf() bool {
 	return (strategy & trackRenamesStrategyLeaf) != 0
 }
 
-func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.DeleteMode, DoMove bool, deleteEmptySrcDirs bool, copyEmptySrcDirs bool) (*syncCopyMove, error) {
+func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.DeleteMode, DoMove bool, deleteEmptySrcDirs bool, copyEmptySrcDirs bool, copyCallback CopyCallback) (*syncCopyMove, error) {
 	if (deleteMode != fs.DeleteModeOff || DoMove) && operations.OverlappingFilterCheck(ctx, fdst, fsrc) {
 		return nil, fserrors.FatalError(fs.ErrorOverlapping)
 	}
@@ -141,6 +145,7 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		copyEmptySrcDirs:       copyEmptySrcDirs,
 		deleteEmptySrcDirs:     deleteEmptySrcDirs,
 		dir:                    "",
+		copyCallback:           copyCallback,
 		srcFilesChan:           make(chan fs.Object, ci.Checkers+ci.Transfers),
 		srcFilesResult:         make(chan error, 1),
 		dstFilesResult:         make(chan error, 1),
@@ -482,27 +487,29 @@ func (s *syncCopyMove) pairRenamer(in *pipe, out *pipe, fraction int, wg *sync.W
 // pairCopyOrMove reads Objects on in and moves or copies them.
 func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs, fraction int, wg *sync.WaitGroup) {
 	defer wg.Done()
-	var err error
 	for {
-		pair, ok := in.GetMax(s.inCtx, fraction)
-		if !ok {
+		select {
+		case <-ctx.Done():
 			return
-		}
-		src := pair.Src
-		dst := pair.Dst
-		if s.DoMove {
-			if src != dst {
-				_, err = operations.MoveTransfer(ctx, fdst, dst, src.Remote(), src)
-			} else {
-				// src == dst signals delete the src
-				err = operations.DeleteFile(ctx, src)
+		case pair, ok := <-in.Get():
+			if !ok {
+				return
 			}
-		} else {
-			_, err = operations.Copy(ctx, fdst, dst, src.Remote(), src)
-		}
-		s.processError(err)
-		if err != nil {
-			s.logger(ctx, operations.TransferError, src, dst, err)
+			src := pair.Src
+			if src == nil {
+				continue
+			}
+			err := operations.CopyFile(ctx, fdst, src.Fs(), src.Remote(), src.Remote())
+			if err != nil {
+				s.processError(err)
+				continue
+			}
+			if s.copyCallback != nil {
+				err = s.copyCallback(src)
+				if err != nil {
+					s.processError(err)
+				}
+			}
 		}
 	}
 }
@@ -1332,7 +1339,7 @@ func (s *syncCopyMove) Match(ctx context.Context, dst, src fs.DirEntry) (recurse
 // If DoMove is true then files will be moved instead of copied.
 //
 // dir is the start directory, "" for root
-func runSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.DeleteMode, DoMove bool, deleteEmptySrcDirs bool, copyEmptySrcDirs bool) error {
+func runSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.DeleteMode, DoMove bool, deleteEmptySrcDirs bool, copyEmptySrcDirs bool, copyCallback CopyCallback) error {
 	ci := fs.GetConfig(ctx)
 	if deleteMode != fs.DeleteModeOff && DoMove {
 		return fserrors.FatalError(errors.New("can't delete and move at the same time"))
@@ -1343,7 +1350,7 @@ func runSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 			return fserrors.FatalError(errors.New("can't use --delete-before with --track-renames"))
 		}
 		// only delete stuff during in this pass
-		do, err := newSyncCopyMove(ctx, fdst, fsrc, fs.DeleteModeOnly, false, deleteEmptySrcDirs, copyEmptySrcDirs)
+		do, err := newSyncCopyMove(ctx, fdst, fsrc, fs.DeleteModeOnly, false, deleteEmptySrcDirs, copyEmptySrcDirs, copyCallback)
 		if err != nil {
 			return err
 		}
@@ -1354,7 +1361,7 @@ func runSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		// Next pass does a copy only
 		deleteMode = fs.DeleteModeOff
 	}
-	do, err := newSyncCopyMove(ctx, fdst, fsrc, deleteMode, DoMove, deleteEmptySrcDirs, copyEmptySrcDirs)
+	do, err := newSyncCopyMove(ctx, fdst, fsrc, deleteMode, DoMove, deleteEmptySrcDirs, copyEmptySrcDirs, copyCallback)
 	if err != nil {
 		return err
 	}
@@ -1364,17 +1371,17 @@ func runSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 // Sync fsrc into fdst
 func Sync(ctx context.Context, fdst, fsrc fs.Fs, copyEmptySrcDirs bool) error {
 	ci := fs.GetConfig(ctx)
-	return runSyncCopyMove(ctx, fdst, fsrc, ci.DeleteMode, false, false, copyEmptySrcDirs)
+	return runSyncCopyMove(ctx, fdst, fsrc, ci.DeleteMode, false, false, copyEmptySrcDirs, nil)
 }
 
-// CopyDir copies fsrc into fdst
-func CopyDir(ctx context.Context, fdst, fsrc fs.Fs, copyEmptySrcDirs bool) error {
-	return runSyncCopyMove(ctx, fdst, fsrc, fs.DeleteModeOff, false, false, copyEmptySrcDirs)
+// CopyDir copies the files from src to dst
+func CopyDir(ctx context.Context, fdst, fsrc fs.Fs, copyEmptySrcDirs bool, copyCallback CopyCallback) error {
+	return runSyncCopyMove(ctx, fdst, fsrc, fs.DeleteModeOff, false, false, copyEmptySrcDirs, copyCallback)
 }
 
 // moveDir moves fsrc into fdst
 func moveDir(ctx context.Context, fdst, fsrc fs.Fs, deleteEmptySrcDirs bool, copyEmptySrcDirs bool) error {
-	return runSyncCopyMove(ctx, fdst, fsrc, fs.DeleteModeOff, true, deleteEmptySrcDirs, copyEmptySrcDirs)
+	return runSyncCopyMove(ctx, fdst, fsrc, fs.DeleteModeOff, true, deleteEmptySrcDirs, copyEmptySrcDirs, nil)
 }
 
 // MoveDir moves fsrc into fdst

@@ -81,6 +81,7 @@ recently very efficiently like this:
     rclone copy --max-age 24h --no-traverse /path/to/src remote:
 
 Use the |--delete-after-copy| flag to delete source files after successful copy.
+Each file will be deleted immediately after it is successfully copied.
 
 Rclone will sync the modification times of files and directories if
 the backend supports it. If metadata syncing is required then use the
@@ -106,15 +107,23 @@ for more info.
 		}
 		cmd.Run(true, true, command, func() error {
 			if srcFileName == "" {
-				err := sync.CopyDir(context.Background(), fdst, fsrc, createEmptySrcDirs)
-				if err == nil && deleteAfterCopy {
-					return operations.DeleteDir(context.Background(), fsrc)
+				// 定义回调函数，在文件复制完成后删除源文件
+				callback := func(obj fs.Object) error {
+					if deleteAfterCopy {
+						return operations.DeleteFile(context.Background(), obj)
+					}
+					return nil
 				}
+				return sync.CopyDir(context.Background(), fdst, fsrc, createEmptySrcDirs, callback)
+			}
+			// 获取源文件对象
+			obj, err := fsrc.NewObject(context.Background(), srcFileName)
+			if err != nil {
 				return err
 			}
-			err := operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
+			err = operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
 			if err == nil && deleteAfterCopy {
-				return operations.DeleteFile(context.Background(), fsrc, srcFileName)
+				return operations.DeleteFile(context.Background(), obj)
 			}
 			return err
 		})
