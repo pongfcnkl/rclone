@@ -439,7 +439,7 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
     }()
     newDst = dst
     if SkipDestructive(ctx, src, "move") {
-        tr.Reset() // Instead of DryRun
+        tr.Reset(ctx) // Instead of DryRun
         return newDst, nil
     }
     // 检查环境变量
@@ -485,7 +485,7 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
                 return newDst, err
             }
             if newDst != nil {
-                tr.Set(newDst.Size())
+                tr.Done(ctx, nil)
             }
             return newDst, nil
         }
