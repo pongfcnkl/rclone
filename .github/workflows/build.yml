@@ -242,7 +242,7 @@ jobs:
 
       - name: Upload Windows 7 Build Artifact
         if: ${{ matrix.job_name == 'windows_7' }}
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: rclone-windows-7
           path: build/windows_7/rclone-$(make version)-windows-amd64-win7.zip
