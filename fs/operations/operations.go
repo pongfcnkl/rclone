@@ -439,8 +439,7 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
     }()
     newDst = dst
     if SkipDestructive(ctx, src, "move") {
-        in := tr.Account(ctx, nil)
-        in.DryRun(src.Size())
+        tr.DryRun(src.Size())
         return newDst, nil
     }
 
@@ -481,15 +480,13 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
                 }
             }
             // 执行移动操作
-            in := tr.Account(ctx, nil)
             newDst, err = doMove(ctx, src, remote)
             if err != nil {
                 fs.Errorf(src, "Couldn't move: %v", err)
                 return newDst, err
             }
             if newDst != nil {
-                in.SetSrc(newDst)
-                in.Account(newDst.Size())
+                tr.Account(ctx, newDst.Size())
             }
             return newDst, nil
         }
