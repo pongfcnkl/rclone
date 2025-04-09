@@ -423,10 +423,8 @@ func MoveTransfer(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string,
 }
 
 // move - see Move for help
-func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.Object, isTransfer bool) (newDst fs.Object, err error) {
-    ci := fs.GetConfig(ctx)
-    moveRmEnabled := os.Getenv("move-rm") == "true"
 
+func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.Object, isTransfer bool) (newDst fs.Object, err error) {
     var tr *accounting.Transfer
     if isTransfer {
         tr = accounting.Stats(ctx).NewTransfer(src, fdst)
@@ -440,14 +438,15 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
         tr.Done(ctx, err)
     }()
     newDst = dst
-
     if SkipDestructive(ctx, src, "move") {
         in := tr.Account(ctx, nil)
         in.DryRun(src.Size())
         return newDst, nil
     }
 
-    if moveRmEnabled {
+    // 检查环境变量
+    moveRm := os.Getenv("move-rm")
+    if moveRm == "true" {
         // 不移动只删除重复文件
         if dst != nil && !SameObject(src, dst) {
             // Delete src
@@ -461,9 +460,9 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
             fs.Infof(src, "No duplicate file found in the destination folder or it is the same file.")
         }
     } else {
-        // 正常移动
+        // 原有的移动逻辑
+        ci := fs.GetConfig(ctx)
         if doMove := fdst.Features().Move; doMove != nil && (SameConfig(src.Fs(), fdst) || (SameRemoteType(src.Fs(), fdst) && (fdst.Features().ServerSideAcrossConfigs || ci.ServerSideAcrossConfigs))) {
-            // Delete destination if it exists and is not the same file as src (could be same file while seemingly different if the remote is case insensitive)
             if dst != nil {
                 remote = dst.Remote()
                 if !SameObject(src, dst) {
@@ -481,18 +480,16 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
                     return MoveCaseInsensitive(ctx, fdst, fdst, remote, src.Remote(), false, src)
                 }
             }
-
-            // Move the file
+            // 执行移动操作
             in := tr.Account(ctx, nil)
-            // 获取 accounting.Account
             newDst, err = doMove(ctx, src, remote)
             if err != nil {
                 fs.Errorf(src, "Couldn't move: %v", err)
                 return newDst, err
             }
             if newDst != nil {
-                // 修正这一行
-                in.SetSize(newDst.Size())
+                in.SetSrc(newDst)
+                in.Account(newDst.Size())
             }
             return newDst, nil
         }
@@ -504,10 +501,10 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
             return newDst, err
         }
 
-        // Delete the source object
+        // Delete src if no error on copy
         err = DeleteFile(ctx, src)
         if err != nil {
-            fs.Errorf(src, "Failed to delete source after successful copy: %v", err)
+            fs.Errorf(src, "Failed to remove source after copy: %v", err)
         }
     }
 
