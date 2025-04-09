@@ -234,7 +234,7 @@ jobs:
       
             # 创建输出目录并打包
             mkdir -p build/windows_7
-            zip -9 build/windows_7/rclone-$(make version)-windows-amd64-win7.zip rclone.exe
+            zip -9 build/windows_7/rclone-win7.zip rclone.exe
             
           else
             make
@@ -245,7 +245,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rclone-windows-7
-          path: build/windows_7/rclone-$(make version)-windows-amd64-win7.zip
+          path: build/windows_7/rclone-win7.zip
 
       - name: Rclone version
         shell: bash
