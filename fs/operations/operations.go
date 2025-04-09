@@ -424,77 +424,92 @@ func MoveTransfer(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string,
 
 // move - see Move for help
 func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.Object, isTransfer bool) (newDst fs.Object, err error) {
-	ci := fs.GetConfig(ctx)
-	var tr *accounting.Transfer
-	if isTransfer {
-		tr = accounting.Stats(ctx).NewTransfer(src, fdst)
-	} else {
-		tr = accounting.Stats(ctx).NewCheckingTransfer(src, "moving")
-	}
-	defer func() {
-		if err == nil {
-			accounting.Stats(ctx).Renames(1)
-		}
-		tr.Done(ctx, err)
-	}()
-	newDst = dst
-	if SkipDestructive(ctx, src, "move") {
-		in := tr.Account(ctx, nil)
-		in.DryRun(src.Size())
-		return newDst, nil
-	}
-	// See if we have Move available
-	if doMove := fdst.Features().Move; doMove != nil && (SameConfig(src.Fs(), fdst) || (SameRemoteType(src.Fs(), fdst) && (fdst.Features().ServerSideAcrossConfigs || ci.ServerSideAcrossConfigs))) {
-		// Delete destination if it exists and is not the same file as src (could be same file while seemingly different if the remote is case insensitive)
-		if dst != nil {
-			remote = dst.Remote()
-			if !SameObject(src, dst) {
-				err = DeleteFile(ctx, dst)
-				if err != nil {
-					return newDst, err
-				}
-			} else if needsMoveCaseInsensitive(fdst, fdst, remote, src.Remote(), false) {
-				doMove = func(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
-					return MoveCaseInsensitive(ctx, fdst, fdst, remote, src.Remote(), false, src)
-				}
-			}
-		} else if needsMoveCaseInsensitive(fdst, fdst, remote, src.Remote(), false) {
-			doMove = func(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
-				return MoveCaseInsensitive(ctx, fdst, fdst, remote, src.Remote(), false, src)
-			}
-		}
-		// Move dst <- src
-		in := tr.Account(ctx, nil) // account the transfer
-		in.ServerSideTransferStart()
-		newDst, err = doMove(ctx, src, remote)
-		switch err {
-		case nil:
-			if newDst != nil && src.String() != newDst.String() {
-				fs.Infof(src, "Moved (server-side) to: %s", newDst.String())
-			} else {
-				fs.Infof(src, "Moved (server-side)")
-			}
-			in.ServerSideMoveEnd(newDst.Size()) // account the bytes for the server-side transfer
-			_ = in.Close()
-			return newDst, nil
-		case fs.ErrorCantMove:
-			fs.Debugf(src, "Can't move, switching to copy")
-			_ = in.Close()
-		default:
-			err = fs.CountError(ctx, err)
-			fs.Errorf(src, "Couldn't move: %v", err)
-			_ = in.Close()
-			return newDst, err
-		}
-	}
-	// Move not found or didn't work so copy dst <- src
-	newDst, err = Copy(ctx, fdst, dst, remote, src)
-	if err != nil {
-		fs.Errorf(src, "Not deleting source as copy failed: %v", err)
-		return newDst, err
-	}
-	// Delete src if no error on copy
-	return newDst, DeleteFile(ctx, src)
+    ci := fs.GetConfig(ctx)
+    moveRmEnabled := os.Getenv("move-rm") == "true"
+
+    var tr *accounting.Transfer
+    if isTransfer {
+        tr = accounting.Stats(ctx).NewTransfer(src, fdst)
+    } else {
+        tr = accounting.Stats(ctx).NewCheckingTransfer(src, "moving")
+    }
+    defer func() {
+        if err == nil {
+            accounting.Stats(ctx).Renames(1)
+        }
+        tr.Done(ctx, err)
+    }()
+    newDst = dst
+
+    if SkipDestructive(ctx, src, "move") {
+        in := tr.Account(ctx, nil)
+        in.DryRun(src.Size())
+        return newDst, nil
+    }
+
+    if moveRmEnabled {
+        // 不移动只删除重复文件
+        if dst != nil && !SameObject(src, dst) {
+            // Delete src
+            err = DeleteFile(ctx, src)
+            if err != nil {
+                fs.Errorf(src, "Couldn't delete source: %v", err)
+                return newDst, err
+            }
+            fs.Infof(src, "Deleted source file: %s", src.String())
+        } else {
+            fs.Infof(src, "No duplicate file found in the destination folder or it is the same file.")
+        }
+    } else {
+        // 正常移动
+        if doMove := fdst.Features().Move; doMove != nil && (SameConfig(src.Fs(), fdst) || (SameRemoteType(src.Fs(), fdst) && (fdst.Features().ServerSideAcrossConfigs || ci.ServerSideAcrossConfigs))) {
+            // Delete destination if it exists and is not the same file as src (could be same file while seemingly different if the remote is case insensitive)
+            if dst != nil {
+                remote = dst.Remote()
+                if !SameObject(src, dst) {
+                    err = DeleteFile(ctx, dst)
+                    if err != nil {
+                        return newDst, err
+                    }
+                } else if needsMoveCaseInsensitive(fdst, fdst, remote, src.Remote(), false) {
+                    doMove = func(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+                        return MoveCaseInsensitive(ctx, fdst, fdst, remote, src.Remote(), false, src)
+                    }
+                }
+            } else if needsMoveCaseInsensitive(fdst, fdst, remote, src.Remote(), false) {
+                doMove = func(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+                    return MoveCaseInsensitive(ctx, fdst, fdst, remote, src.Remote(), false, src)
+                }
+            }
+
+            // Move the file
+            in := tr.Account(ctx, nil)
+            newDst, err = doMove(ctx, src, remote)
+            if err != nil {
+                fs.Errorf(src, "Couldn't move: %v", err)
+                return newDst, err
+            }
+            if newDst != nil {
+                in.Account(newDst.Size())
+            }
+            return newDst, nil
+        }
+
+        // Move not available, copy+delete instead
+        newDst, err = Copy(ctx, fdst, dst, remote, src)
+        if err != nil {
+            fs.Errorf(src, "Not deleting source as copy failed: %v", err)
+            return newDst, err
+        }
+
+        // Delete the source object
+        err = DeleteFile(ctx, src)
+        if err != nil {
+            fs.Errorf(src, "Failed to delete source after successful copy: %v", err)
+        }
+    }
+
+    return newDst, nil
 }
 
 // CanServerSideMove returns true if fdst support server-side moves or
