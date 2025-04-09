@@ -226,7 +226,14 @@ jobs:
             export GOARCH=amd64
             export CGO_ENABLED=1
             export CC=/usr/bin/x86_64-w64-mingw32-gcc
-            make
+            
+            go version  # 检查 Go 版本
+            go build -v $(echo $BUILD_FLAGS) -tags "$GOTAGS" $(echo $BUILD_ARGS) -o rclone.exe
+      
+            # 创建输出目录并打包
+            mkdir -p build
+            zip -9 build/rclone-$(make version)-windows-amd64-win7.zip rclone.exe
+            
           else
             make
           fi
