@@ -233,8 +233,8 @@ jobs:
             go build -o rclone.exe
       
             # 创建输出目录并打包
-            mkdir -p build
-            zip -9 build/rclone-$(make version)-windows-amd64-win7.zip rclone.exe
+            mkdir -p build/windows_7
+            zip -9 build/windows_7/rclone-$(make version)-windows-amd64-win7.zip rclone.exe
             
           else
             make
@@ -290,6 +290,7 @@ jobs:
           if-no-files-found: ignore
           path: |
             build/
+            build/${{ matrix.job_name }}/
       - 
         if: ${{ ! contains(github.ref, 'refs/tags/') }}
         name: Upload Test Artifact
@@ -298,6 +299,9 @@ jobs:
           name: ${{ matrix.job_name }}
           if-no-files-found: ignore
           path: |
+            build/${{ matrix.job_name }}/
+            build/${{ matrix.job_name }}/*amd64.zip
+            build/${{ matrix.job_name }}/*arm64.zip
             build/*amd64.zip
             build/*arm64.zip
 
