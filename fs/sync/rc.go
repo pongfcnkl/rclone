@@ -50,7 +50,7 @@ func rcSyncCopyMove(ctx context.Context, in rc.Params, name string) (out rc.Para
 	case "sync":
 		return nil, Sync(ctx, dstFs, srcFs, createEmptySrcDirs)
 	case "copy":
-		return nil, CopyDir(ctx, dstFs, srcFs, createEmptySrcDirs)
+		return nil, CopyDir(ctx, dstFs, srcFs, createEmptySrcDirs, nil)
 	case "move":
 		deleteEmptySrcDirs, err := in.GetBool("deleteEmptySrcDirs")
 		if rc.NotErrParamNotFound(err) {
