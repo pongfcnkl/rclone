@@ -914,11 +914,19 @@ func (f *Fs) fetchUserAgent(ctx context.Context) error {
 // Copy 函数修改
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
     srcObj, ok := src.(*Object)
-    if (!ok) {
+    if !ok {
         return nil, fs.ErrorObjectNotFound
     }
 
-    // Ensure destination directory exists
+    // 确保源和目标路径不同
+    srcPath := path.Join(f.root, srcObj.remote)
+    dstPath := path.Join(f.root, remote)
+    if srcPath == dstPath {
+        fs.Debugf(nil, "Source and destination are identical: %s", srcPath)
+        return srcObj, nil
+    }
+
+    // 确保目标目录存在
     dstDir := path.Dir(remote)
     err := f.checkPath(ctx, dstDir) 
     if err != nil {
@@ -927,31 +935,20 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
     // 构造复制请求
     data := map[string]interface{}{
-        "src_dir": path.Join(f.root, path.Dir(srcObj.remote)),
-        "dst_dir": path.Join(f.root, path.Dir(remote)),
+        "src_dir": path.Dir(srcPath),
+        "dst_dir": path.Dir(dstPath),
         "names":   []string{path.Base(srcObj.remote)},
     }
 
     // 添加调试日志
     fs.Debugf(nil, "Copy request data: %+v", data)
 
-    // Retry logic for copy operation
-    var resp struct {
-        Code    int    `json:"code"`
-        Message string `json:"message"`
-        Data    struct {
-            TaskID string `json:"task_id"`
-        } `json:"data"`
-    }
-
+    // 发送复制请求
+    var resp requestResponse
     err = f.pacer.Call(func() (bool, error) {
         err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
         if err != nil {
-            // 添加响应内容调试
-            if strings.Contains(err.Error(), "invalid character") {
-                fs.Debugf(nil, "Invalid JSON response received: %v", err)
-                return true, err // 重试此类错误
-            }
+            fs.Debugf(nil, "Copy request failed: %v", err)
             return shouldRetry(err), err
         }
         return false, nil
@@ -961,104 +958,55 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         return nil, fmt.Errorf("failed to start copy: %w", err)
     }
 
-    // 添加任务ID调试日志
-    fs.Debugf(nil, "Copy task created with ID: %s", resp.Data.TaskID)
-
-    // Monitor copy progress with retries 
-    err = f.pacer.Call(func() (bool, error) {
-        err := f.waitForCopyTask(ctx, resp.Data.TaskID)
-        return shouldRetry(err), err
-    })
-
-    if err != nil {
-        return nil, fmt.Errorf("copy failed: %w", err)
-    }
-
     // 清除缓存
     f.invalidateCache(path.Dir(remote))
 
-    // 返回新对象
-    return f.NewObject(ctx, remote)
-}
-
-// waitForCopyTask 监控复制任务的进度
-func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
-    const (
-        checkInterval = 1 * time.Second
-        maxRetries = 3
-    )
-
-    retries := 0
-    for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        case <-time.After(checkInterval):
-            // 查询未完成任务
-            var resp struct {
-                Code    int    `json:"code"`
-                Message string `json:"message"`
-                Data    []struct {
-                    ID        string  `json:"id"`
-                    State     int     `json:"state"` // 修改为int类型
-                    Progress  float64 `json:"progress"`
-                    Error     string  `json:"error"`
-                    TotalBytes int64  `json:"total_bytes"`
-                } `json:"data"`
-            }
-
-            err := f.doCFRequestMust(ctx, "GET", apiTaskInfo, nil, &resp)
-            if err != nil {
-                retries++
-                if retries > maxRetries {
-                    return fmt.Errorf("failed to check copy status after %d retries: %w", retries, err)
-                }
-                continue
-            }
-
-            // 重置重试计数
-            retries = 0
-
-            // 在未完成任务列表中查找目标任务
-            for _, task := range resp.Data {
-                if task.ID == taskID {
-                    // 检查任务状态
-                    switch task.State {
-                    case 2: // succeeded
-                        return nil
-                    case 4: // failed 
-                        return fmt.Errorf("copy failed: %s", task.Error)
-                    case 5: // canceled
-                        return fmt.Errorf("copy canceled")
-                    default:
-                        // 继续等待,输出进度
-                        fs.Debugf(nil, "Copy progress: %.2f%%, Total bytes: %d", 
-                            task.Progress, task.TotalBytes)
-                    }
-                    break
-                }
-            }
+    // 等待目标文件出现
+    var retries = 0
+    const maxRetries = 10
+    for retries < maxRetries {
+        retries++
+        // 检查目标文件是否存在
+        obj, err := f.NewObject(ctx, remote)
+        if err == nil {
+            return obj, nil
         }
+        if retries == maxRetries {
+            return nil, fmt.Errorf("failed to verify copy completion after %d retries", maxRetries)
+        }
+        // 等待一段时间后重试
+        time.Sleep(time.Second)
     }
+
+    // 返回新对象信息
+    return &Object{
+        fs:        f,
+        remote:    remote,
+        size:      srcObj.size,
+        modTime:   srcObj.modTime,
+        md5sum:    srcObj.md5sum,
+        sha1sum:   srcObj.sha1sum,
+        sha256sum: srcObj.sha256sum,
+    }, nil
 }
 
 // CopyDir 实现目录复制
 func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote string) error {
     // 确保源和目标都是 AList 类型
     srcAlist, ok := srcFs.(*Fs)
-    if !ok {
+    if (!ok) {
         return fs.ErrorCantCopy
     }
 
     // 创建目标目录
     err := f.Mkdir(ctx, dstRemote)
-    if err != nil {
+    if (err != nil) {
         return fmt.Errorf("failed to create destination directory: %w", err)
     }
 
     // 获取源目录中的所有文件
     entries, err := srcAlist.List(ctx, srcRemote)
-    if err != nil {
+    if (err != nil) {
         return fmt.Errorf("failed to list source directory: %w", err)
     }
 
