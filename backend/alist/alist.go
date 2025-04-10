@@ -122,7 +122,7 @@ type Options struct {
 	MetaPass  string `config:"meta_pass"`
 	RootPath  string `config:"root_path"`
 	CfServer  string `config:"cf_server"`
-	UserAgent string `config:"user_agent"`
+	UserAgent string `config:"user_agent"` // 移除最后一个逗号
 }
 
 // Fs represents a remote AList server.
@@ -1124,7 +1124,7 @@ func (f *Fs) checkRoot(ctx context.Context) error {
             // 如果目录不存在则创建
             if err == fs.ErrorDirNotFound {
                 createErr := f.Mkdir(ctx, currentPath)
-                if createErr != nil {
+                if createErr != nil) {
                     return fmt.Errorf("failed to create directory %s: %w", currentPath, createErr)
                 }
                 fs.Debugf(nil, "Created directory: %s", currentPath)
