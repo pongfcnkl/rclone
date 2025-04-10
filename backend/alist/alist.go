@@ -918,9 +918,9 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         return nil, fs.ErrorObjectNotFound
     }
 
-    // 确保源和目标路径不同
-    srcPath := path.Join(f.root, srcObj.remote)
-    dstPath := path.Join(f.root, remote)
+    // 确保源和目标路径不同 - 修改这部分逻辑
+    srcPath := srcObj.fs.root + "/" + srcObj.remote
+    dstPath := f.root + "/" + remote
     if srcPath == dstPath {
         fs.Debugf(nil, "Source and destination are identical: %s", srcPath)
         return srcObj, nil
@@ -933,7 +933,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         return nil, fmt.Errorf("failed to check destination path: %w", err)
     }
 
-    // 构造复制请求
+    // 构造复制请求 - 修改路径处理
     data := map[string]interface{}{
         "src_dir": path.Dir(srcPath),
         "dst_dir": path.Dir(dstPath),
@@ -961,21 +961,10 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
     // 清除缓存
     f.invalidateCache(path.Dir(remote))
 
-    // 等待目标文件出现
-    var retries = 0
-    const maxRetries = 10
-    for retries < maxRetries {
-        retries++
-        // 检查目标文件是否存在
-        obj, err := f.NewObject(ctx, remote)
-        if err == nil {
-            return obj, nil
-        }
-        if retries == maxRetries {
-            return nil, fmt.Errorf("failed to verify copy completion after %d retries", maxRetries)
-        }
-        // 等待一段时间后重试
-        time.Sleep(time.Second)
+    // 等待并验证文件复制是否成功
+    err = f.waitForFile(ctx, remote, srcObj.size)
+    if err != nil {
+        return nil, err
     }
 
     // 返回新对象信息
@@ -1135,4 +1124,33 @@ func (f *Fs) processListResponse(dir string, resp listResponse) fs.DirEntries {
         entries = append(entries, f.fileInfoToDirEntry(item, dir))
     }
     return entries
+}
+
+// 添加新的辅助函数来等待和验证文件
+func (f *Fs) waitForFile(ctx context.Context, remote string, expectedSize int64) error {
+    startTime := time.Now()
+    const maxWaitTime = 30 * time.Second
+    const checkInterval = time.Second
+
+    for {
+        if time.Since(startTime) > maxWaitTime {
+            return fmt.Errorf("timeout waiting for file to appear: %s", remote)
+        }
+
+        obj, err := f.NewObject(ctx, remote)
+        if err == nil {
+            // 验证文件大小
+            if obj.Size() == expectedSize {
+                return nil
+            }
+            return fmt.Errorf("copied file size mismatch, expected %d got %d", expectedSize, obj.Size())
+        }
+
+        // 等待一段时间后重试
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-time.After(checkInterval):
+        }
+    }
 }
