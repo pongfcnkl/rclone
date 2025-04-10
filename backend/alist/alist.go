@@ -914,7 +914,7 @@ func (f *Fs) fetchUserAgent(ctx context.Context) error {
 // Copy 函数修改
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
     srcObj, ok := src.(*Object)
-    if !ok {  // 修复括号语法
+    if !ok {
         return nil, fs.ErrorObjectNotFound
     }
 
@@ -949,7 +949,17 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
     var resp struct {
         Code    int    `json:"code"`
         Message string `json:"message"`
-        Data    string `json:"data"`
+        Data    struct {
+            Tasks []struct {
+                ID        string     `json:"id"`
+                Name      string     `json:"name"`
+                State     int        `json:"state"`
+                Progress  float64    `json:"progress"`
+                Error     string     `json:"error"`
+                StartTime *time.Time `json:"start_time"`
+                EndTime   *time.Time `json:"end_time"`
+            } `json:"tasks"`
+        } `json:"data"`
     }
 
     err := f.pacer.Call(func() (bool, error) {
@@ -968,26 +978,23 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         return nil, fmt.Errorf("failed to copy: %w", err)
     }
 
+    // 获取任务ID
+    if len(resp.Data.Tasks) == 0 {
+        return nil, fmt.Errorf("no task created for copy operation")
+    }
+    taskID := resp.Data.Tasks[0].ID
+
+    // 等待任务完成
+    err = f.waitForCopyTask(ctx, taskID)
+    if err != nil {
+        return nil, fmt.Errorf("copy task failed: %w", err)
+    }
+
     // 清除缓存
     f.invalidateCache(path.Dir(remote))
 
-    // 等待并验证文件复制完成
-    startTime := time.Now()
-    const maxWaitTime = 30 * time.Second
-
-    for time.Since(startTime) < maxWaitTime {
-        obj, err := f.NewObject(ctx, remote)
-        if err == nil {
-            if obj.Size() == srcObj.size || srcObj.size == 0 {
-                return obj, nil
-            }
-            fs.Debugf(nil, "Size mismatch for %s: expected %d got %d",
-                remote, srcObj.size, obj.Size())
-        }
-        time.Sleep(time.Second)
-    }
-
-    return nil, fmt.Errorf("timeout waiting for copy completion of %s", remote)
+    // 验证文件复制是否成功
+    return f.waitForFileCompletion(ctx, remote, srcObj.size)
 }
 
 // CopyDir 实现目录复制
