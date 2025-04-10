@@ -914,7 +914,7 @@ func (f *Fs) fetchUserAgent(ctx context.Context) error {
 // Copy 函数修改
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
     srcObj, ok := src.(*Object)
-    if !ok) {
+    if !ok {  // 修复括号语法
         return nil, fs.ErrorObjectNotFound
     }
 
@@ -994,13 +994,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote string) error {
     // 确保源和目标都是 AList 类型
     srcAlist, ok := srcFs.(*Fs)
-    if !ok) {
+    if !ok {  // 修复括号语法
         return fs.ErrorCantCopy
     }
 
     // 创建目标目录
     err := f.Mkdir(ctx, dstRemote)
-    if (err != nil) {
+    if err != nil {  // 修复括号语法
         return fmt.Errorf("failed to create destination directory: %w", err)
     }
 
