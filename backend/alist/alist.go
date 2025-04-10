@@ -1052,19 +1052,19 @@ func (f *Fs) checkRoot(ctx context.Context) error {
 }
 
 // Add new helper function
-func (f *Fs) checkPath(ctx context.Context, path string) error {
-    if path == "" {
+func (f *Fs) checkPath(ctx context.Context, dirPath string) error {
+    if dirPath == "" {
         return nil
     }
 
     // Check if directory exists
-    _, err := f.List(ctx, path)
+    _, err := f.List(ctx, dirPath)
     if err == nil {
         return nil
     }
 
     // If parent doesn't exist, create it first
-    parent := path.Dir(path)
+    parent := path.Dir(dirPath) // 使用 path 包的 Dir 函数
     if parent != "." && parent != "/" {
         err = f.checkPath(ctx, parent)
         if err != nil {
@@ -1073,7 +1073,7 @@ func (f *Fs) checkPath(ctx context.Context, path string) error {
     }
 
     // Create directory
-    return f.Mkdir(ctx, path)
+    return f.Mkdir(ctx, dirPath)
 }
 
 // Add helper function for retry decisions
