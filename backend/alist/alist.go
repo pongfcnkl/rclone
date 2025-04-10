@@ -914,14 +914,14 @@ func (f *Fs) fetchUserAgent(ctx context.Context) error {
 // Copy 函数修改
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
     srcObj, ok := src.(*Object)
-    if !ok {
+    if (!ok) {
         return nil, fs.ErrorObjectNotFound
     }
 
-    // 确保源和目标路径不同 - 修改这部分逻辑
+    // 确保源和目标路径不同
     srcFs := srcObj.fs
-    srcPath := path.Join(srcFs.root, srcObj.remote)
-    dstPath := path.Join(f.root, remote)
+    srcPath := srcObj.remote  // 使用相对路径
+    dstPath := remote        // 使用相对路径
     
     if srcPath == dstPath {
         fs.Debugf(nil, "Source and destination are identical: %s", srcPath)
@@ -931,47 +931,43 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
     // 确保目标目录存在
     dstDir := path.Dir(remote)
     err := f.checkPath(ctx, dstDir) 
-    if err != nil {
+    if (err != nil) {
         return nil, fmt.Errorf("failed to check destination path: %w", err)
     }
 
-    // 修正路径处理 - 使用 path.Clean 清理路径
-    cleanSrcPath := path.Clean(srcPath)
-    cleanDstPath := path.Clean(dstPath)
-
+    // 构造复制请求
     data := map[string]interface{}{
-        "src_dir": path.Dir(cleanSrcPath),
-        "dst_dir": path.Dir(cleanDstPath),
-        "names":   []string{path.Base(srcObj.remote)},
+        "src_dir": path.Join(srcFs.root, path.Dir(srcPath)),  // 添加源的root路径
+        "dst_dir": path.Join(f.root, path.Dir(dstPath)),      // 添加目标的root路径
+        "names":   []string{path.Base(srcPath)},
     }
 
     // 添加详细的调试日志
-    fs.Debugf(nil, "Copy details: src=%s, dst=%s, name=%s", 
-        path.Dir(cleanSrcPath),
-        path.Dir(cleanDstPath),
-        path.Base(srcObj.remote))
+    fs.Debugf(nil, "Copy details: src_root=%s, dst_root=%s, src_path=%s, dst_path=%s", 
+        srcFs.root, f.root, srcPath, dstPath)
     fs.Debugf(nil, "Copy request data: %+v", data)
 
     // 发送复制请求
     var resp struct {
         Code    int    `json:"code"`
         Message string `json:"message"`
-        Data    struct {
-            TaskID string `json:"task_id"`
-        } `json:"data"`
+        Data    string `json:"data"`  // 直接获取字符串响应
     }
 
     err = f.pacer.Call(func() (bool, error) {
         err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
-        if err != nil {
+        if (err != nil) {
             fs.Debugf(nil, "Copy request failed: %v", err)
             return shouldRetry(err), err
+        }
+        if (resp.Code != 200) {
+            return false, fmt.Errorf("copy failed with code %d: %s", resp.Code, resp.Message)
         }
         return false, nil
     })
 
-    if err != nil {
-        return nil, fmt.Errorf("failed to start copy: %w", err)
+    if (err != nil) {
+        return nil, fmt.Errorf("failed to copy: %w", err)
     }
 
     // 清除缓存
@@ -979,7 +975,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
     // 等待并验证文件复制完成
     obj, err := f.waitForFileCompletion(ctx, remote, srcObj.size)
-    if err != nil {
+    if (err != nil) {
         return nil, err
     }
 
@@ -1028,7 +1024,7 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
                 newRemote := path.Join(dstRemote, relPath)
 
                 _, err := f.Copy(ctx, obj, newRemote)
-                if err != nil {
+                if (err != nil) {
                     errMu.Lock()
                     copyErrors = append(copyErrors, fmt.Errorf("failed to copy %s: %w", obj.Remote(), err))
                     errMu.Unlock()
@@ -1056,7 +1052,7 @@ func (f *Fs) checkRoot(ctx context.Context) error {
     
     // 逐级检查并创建目录
     for _, part := range parts {
-        if part == "" {
+        if (part == "") {
             continue
         }
         
@@ -1064,11 +1060,11 @@ func (f *Fs) checkRoot(ctx context.Context) error {
         
         // 尝试列出当前目录
         _, err := f.List(ctx, currentPath)
-        if err != nil {
+        if (err != nil) {
             // 如果目录不存在则创建
-            if err == fs.ErrorDirNotFound {
+            if (err == fs.ErrorDirNotFound) {
                 createErr := f.Mkdir(ctx, currentPath)
-                if createErr != nil { // 修复这里的语法错误
+                if (createErr != nil) { // 修复这里的语法错误
                     return fmt.Errorf("failed to create directory %s: %w", currentPath, createErr)
                 }
                 fs.Debugf(nil, "Created directory: %s", currentPath)
@@ -1083,21 +1079,21 @@ func (f *Fs) checkRoot(ctx context.Context) error {
 
 // Add new helper function
 func (f *Fs) checkPath(ctx context.Context, dirPath string) error {
-    if dirPath == "" {
+    if (dirPath == "") {
         return nil
     }
 
     // Check if directory exists
     _, err := f.List(ctx, dirPath)
-    if err == nil {
+    if (err == nil) {
         return nil
     }
 
     // If parent doesn't exist, create it first
     parent := path.Dir(dirPath) // 使用 path 包的 Dir 函数
-    if parent != "." && parent != "/" {
+    if (parent != "." && parent != "/") {
         err = f.checkPath(ctx, parent)
-        if err != nil {
+        if (err != nil) {
             return err
         }
     }
@@ -1108,15 +1104,15 @@ func (f *Fs) checkPath(ctx context.Context, dirPath string) error {
 
 // Add helper function for retry decisions
 func shouldRetry(err error) bool {
-    if err == nil {
+    if (err == nil) {
         return false
     }
     
     // Add specific error types that should trigger retry
-    if strings.Contains(err.Error(), "directory not found") {
+    if (strings.Contains(err.Error(), "directory not found")) {
         return true
     }
-    if strings.Contains(err.Error(), "network error") {
+    if (strings.Contains(err.Error(), "network error")) {
         return true
     }
     // Add other retryable error conditions as needed
@@ -1140,14 +1136,14 @@ func (f *Fs) waitForFile(ctx context.Context, remote string, expectedSize int64)
     const checkInterval = time.Second
 
     for {
-        if time.Since(startTime) > maxWaitTime {
+        if (time.Since(startTime) > maxWaitTime) {
             return fmt.Errorf("timeout waiting for file to appear: %s", remote)
         }
 
         obj, err := f.NewObject(ctx, remote)
-        if err == nil {
+        if (err == nil) {
             // 验证文件大小
-            if obj.Size() == expectedSize {
+            if (obj.Size() == expectedSize) {
                 return nil
             }
             return fmt.Errorf("copied file size mismatch, expected %d got %d", expectedSize, obj.Size())
@@ -1198,14 +1194,14 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
             }
 
             err := f.doCFRequestMust(ctx, "GET", apiTaskInfo, nil, &resp)
-            if err != nil {
+            if (err != nil) {
                 fs.Debugf(nil, "Failed to check task status: %v", err)
                 continue
             }
 
             // 查找目标任务
             for _, task := range resp.Data {
-                if task.ID == taskID {
+                if (task.ID == taskID) {
                     fs.Debugf(nil, "Task %s: state=%d progress=%.2f%% bytes=%d", 
                         taskID, task.State, task.Progress, task.TotalBytes)
 
@@ -1235,24 +1231,41 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
 func (f *Fs) waitForFileCompletion(ctx context.Context, remote string, expectedSize int64) (fs.Object, error) {
     startTime := time.Now()
     const (
-        maxWaitTime = 2 * time.Minute
-        checkInterval = 2 * time.Second
+        maxWaitTime = 5 * time.Minute  // 增加等待时间
+        checkInterval = 5 * time.Second // 增加检查间隔
+        maxRetries = 3
     )
 
     for {
-        if time.Since(startTime) > maxWaitTime {
+        if (time.Since(startTime) > maxWaitTime) {
             return nil, fmt.Errorf("timeout waiting for file completion: %s", remote)
         }
 
-        obj, err := f.NewObject(ctx, remote)
-        if err == nil {
-            if obj.Size() == expectedSize {
+        var retryCount int
+        var obj fs.Object
+        var err error
+
+        // 添加重试逻辑
+        for retryCount < maxRetries {
+            obj, err = f.NewObject(ctx, remote)
+            if (err == nil) {
+                break
+            }
+            retryCount++
+            if (retryCount < maxRetries) {
+                time.Sleep(time.Second)
+            }
+        }
+
+        if (err == nil) {
+            if (obj.Size() == expectedSize || expectedSize == 0) {
+                fs.Debugf(nil, "File copy completed successfully: %s", remote)
                 return obj, nil
             }
             fs.Debugf(nil, "File size mismatch for %s: expected %d, got %d", 
                 remote, expectedSize, obj.Size())
         } else {
-            fs.Debugf(nil, "File not found yet: %s", remote)
+            fs.Debugf(nil, "File not found yet: %s (attempt %d)", remote, retryCount)
         }
 
         select {
