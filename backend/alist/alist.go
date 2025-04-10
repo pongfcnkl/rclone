@@ -1183,9 +1183,17 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
                 continue
             }
 
+            // 如果 tasks 为空，说明任务已经完成
+            if len(tasks) == 0 {
+                fs.Debugf(nil, "Task %s completed (no longer in task list)", taskID)
+                return nil
+            }
+
             // 查找目标任务
+            taskFound := false
             for _, task := range tasks {
                 if task.ID == taskID {
+                    taskFound = true
                     fs.Debugf(nil, "Task %s: state=%d progress=%.2f%% bytes=%d", 
                         taskID, task.State, task.Progress, task.TotalBytes)
 
@@ -1206,6 +1214,12 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
                         fs.Debugf(nil, "Unknown task state: %d", task.State)
                     }
                 }
+            }
+
+            // 如果找不到任务，说明任务已经完成
+            if !taskFound {
+                fs.Debugf(nil, "Task %s completed (not found in task list)", taskID)
+                return nil
             }
         }
     }
