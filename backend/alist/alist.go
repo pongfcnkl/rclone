@@ -46,6 +46,16 @@ const (
 	apiTaskInfo = "/api/task/copy/undone"  // 将 apiTaskInfo 改为未完成任务接口
 )
 
+// 添加任务状态常量
+const (
+    TaskStateWaiting = 0   // 等待中
+    TaskStateRunning = 1   // 正在运行
+    TaskStateSuccess = 2   // 成功完成 
+    TaskStatePaused = 3    // 暂停
+    TaskStateFailed = 4    // 失败
+    TaskStateCanceled = 5  // 取消
+)
+
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "alist",
@@ -198,6 +208,19 @@ type copyTask struct {
 	State     string  `json:"state"` 
 	Progress  float64 `json:"progress"`
 	Error     string  `json:"error"`
+}
+
+// 任务结构体
+type CopyTask struct {
+    ID          string     `json:"id"`
+    Name        string     `json:"name"`
+    State       int        `json:"state"`
+    Status      string     `json:"status"`
+    Progress    float64    `json:"progress"`
+    StartTime   *time.Time `json:"start_time"`
+    EndTime     *time.Time `json:"end_time"`
+    TotalBytes  int64      `json:"total_bytes"`
+    Error       string     `json:"error"`
 }
 
 // Object describes an AList object.
@@ -1290,4 +1313,56 @@ func (f *Fs) waitForFileCompletion(ctx context.Context, remote string, expectedS
             continue
         }
     }
+}
+
+// 启动复制任务并返回任务ID
+func (f *Fs) startCopyTask(ctx context.Context, src fs.Object, dstPath string) (string, error) {
+    srcObj, ok := src.(*Object)
+    if !ok {
+        return "", fs.ErrorObjectNotFound
+    }
+
+    srcPath := path.Join(srcObj.fs.root, srcObj.remote)
+    data := map[string]interface{}{
+        "src_dir": path.Dir(srcPath),
+        "dst_dir": path.Dir(dstPath),
+        "names":   []string{path.Base(srcPath)},
+    }
+
+    var resp struct {
+        Code    int    `json:"code"`
+        Message string `json:"message"`
+        Data    struct {
+            Tasks []struct {
+                ID string `json:"id"`
+            } `json:"tasks"`
+        } `json:"data"`
+    }
+
+    err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
+    if err != nil {
+        return "", err
+    }
+
+    if len(resp.Data.Tasks) == 0 {
+        return "", fmt.Errorf("no task ID returned")
+    }
+
+    return resp.Data.Tasks[0].ID, nil
+}
+
+// 监控未完成的复制任务
+func (f *Fs) getUndoneTasks(ctx context.Context) ([]CopyTask, error) {
+    var resp struct {
+        Code    int        `json:"code"`
+        Message string     `json:"message"`
+        Data    []CopyTask `json:"data"`
+    }
+
+    err := f.doCFRequestMust(ctx, "GET", apiTaskInfo, nil, &resp)
+    if err != nil {
+        return nil, err
+    }
+
+    return resp.Data, nil
 }
