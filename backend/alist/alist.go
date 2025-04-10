@@ -520,30 +520,39 @@ func (f *Fs) fileInfoToDirEntry(item fileInfo, dir string) fs.DirEntry {
 
 // List lists the objects and directories in dir.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
+	// 检查缓存
 	if cached, ok := f.getCachedList(dir); ok {
-		for _, item := range cached.Data.Content {
-			entries = append(entries, f.fileInfoToDirEntry(item, dir))
-		}
-		return entries, nil
+		return f.processListResponse(dir, cached), nil
 	}
+
 	data := map[string]interface{}{
 		"path":     path.Join(f.root, dir),
 		"per_page": 1000,
 		"page":     1,
 		"password": f.opt.MetaPass,
+		"refresh":  f.userPermission == 2,
 	}
-	if f.userPermission == 2 {
-		data["refresh"] = true
-	}
-	var listResp listResponse
-	if err = f.doCFRequestMust(ctx, "POST", apiList, data, &listResp); err != nil {
+
+	var resp listResponse
+	err = f.pacer.Call(func() (bool, error) {
+		err := f.doCFRequestMust(ctx, "POST", apiList, data, &resp)
+		if err != nil {
+			if strings.Contains(err.Error(), "object not found") {
+				return false, fs.ErrorDirNotFound
+			}
+			return shouldRetry(err), err
+		}
+		return false, nil
+	})
+
+	if err != nil {
 		return nil, err
 	}
-	f.setCachedList(dir, listResp)
-	for _, item := range listResp.Data.Content {
-		entries = append(entries, f.fileInfoToDirEntry(item, dir))
-	}
-	return entries, nil
+
+	// 缓存结果
+	f.setCachedList(dir, resp)
+	
+	return f.processListResponse(dir, resp), nil
 }
 
 // Put uploads an object to the remote.
@@ -597,12 +606,33 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 
 // Mkdir creates a directory.
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
-	mkdirURL := "/api/fs/mkdir"
+	// 检查目录名是否合法
+	if strings.Contains(dir, "..") {
+		return fmt.Errorf("invalid directory name containing ..")
+	}
+	
+	// 规范化路径
+	dir = path.Clean(dir)
+	
 	data := map[string]string{
 		"path": path.Join(f.root, dir),
 	}
-	var mkdirResp requestResponse
-	return f.doCFRequestMust(ctx, "POST", mkdirURL, data, &mkdirResp)
+	
+	var resp requestResponse
+	err := f.pacer.Call(func() (bool, error) {
+		err := f.doCFRequestMust(ctx, "POST", apiMkdir, data, &resp)
+		return shouldRetry(err), err
+	})
+	
+	if err != nil {
+		return fmt.Errorf("mkdir failed: %w", err)
+	}
+	
+	// 清除目录缓存
+	parentDir := path.Dir(dir)
+	f.invalidateCache(parentDir)
+	
+	return nil
 }
 
 // Rmdir removes an empty directory.
@@ -1039,15 +1069,34 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
 
 // Add new helper function
 func (f *Fs) checkRoot(ctx context.Context) error {
-    // Try to list root directory
-    _, err := f.List(ctx, "")
-    if err != nil {
-        // If directory doesn't exist, create it
-        if err == fs.ErrorDirNotFound {
-            return f.Mkdir(ctx, "")
+    // 分解root路径
+    parts := strings.Split(strings.Trim(f.root, "/"), "/")
+    currentPath := ""
+    
+    // 逐级检查并创建目录
+    for _, part := range parts {
+        if part == "" {
+            continue
         }
-        return err
+        
+        currentPath = path.Join(currentPath, part)
+        
+        // 尝试列出当前目录
+        _, err := f.List(ctx, currentPath)
+        if err != nil {
+            // 如果目录不存在则创建
+            if err == fs.ErrorDirNotFound {
+                createErr := f.Mkdir(ctx, currentPath)
+                if createErr != nil {
+                    return fmt.Errorf("failed to create directory %s: %w", currentPath, createErr)
+                }
+                fs.Debugf(nil, "Created directory: %s", currentPath)
+                continue
+            }
+            return fmt.Errorf("failed to check directory %s: %w", currentPath, err) 
+        }
     }
+    
     return nil
 }
 
@@ -1092,4 +1141,13 @@ func shouldRetry(err error) bool {
     // Add other retryable error conditions as needed
     
     return false
+}
+
+// 添加辅助函数处理List响应
+func (f *Fs) processListResponse(dir string, resp listResponse) fs.DirEntries {
+    entries := make(fs.DirEntries, 0, len(resp.Data.Content))
+    for _, item := range resp.Data.Content {
+        entries = append(entries, f.fileInfoToDirEntry(item, dir))
+    }
+    return entries
 }
