@@ -42,7 +42,7 @@ const (
 	apiRemove = "/api/fs/remove"
 	apiGet    = "/api/fs/get"
 	apiMe     = "/api/me"
-	apiCopy   = "/api/task/copy"
+	apiCopy   = "/api/fs/copy"
 	apiTaskInfo = "/api/task/copy/undone"  // 将 apiTaskInfo 改为未完成任务接口
 )
 
@@ -914,7 +914,7 @@ func (f *Fs) fetchUserAgent(ctx context.Context) error {
 // Copy 函数修改
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
     srcObj, ok := src.(*Object)
-    if !ok {
+    if (!ok) {
         return nil, fs.ErrorObjectNotFound
     }
 
