@@ -914,59 +914,57 @@ func (f *Fs) fetchUserAgent(ctx context.Context) error {
 // Copy 函数修改
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
     srcObj, ok := src.(*Object)
-    if (!ok) {
+    if !ok) {
         return nil, fs.ErrorObjectNotFound
     }
 
-    // 确保源和目标路径不同
-    srcFs := srcObj.fs
-    srcPath := srcObj.remote  // 使用相对路径
-    dstPath := remote        // 使用相对路径
-    
+    // 获取源和目标的相对路径
+    srcPath := path.Join(srcObj.fs.root, srcObj.remote)
+    dstPath := path.Join(f.root, remote)
+
+    fs.Debugf(nil, "Copying from %q to %q", srcPath, dstPath)
+
+    // 检查源和目标是否相同
     if srcPath == dstPath {
         fs.Debugf(nil, "Source and destination are identical: %s", srcPath)
         return srcObj, nil
     }
 
     // 确保目标目录存在
-    dstDir := path.Dir(remote)
-    err := f.checkPath(ctx, dstDir) 
-    if (err != nil) {
+    dstDir := path.Dir(dstPath)
+    if err := f.checkPath(ctx, dstDir); err != nil {
         return nil, fmt.Errorf("failed to check destination path: %w", err)
     }
 
     // 构造复制请求
     data := map[string]interface{}{
-        "src_dir": path.Join(srcFs.root, path.Dir(srcPath)),  // 添加源的root路径
-        "dst_dir": path.Join(f.root, path.Dir(dstPath)),      // 添加目标的root路径
+        "src_dir": path.Dir(srcPath),
+        "dst_dir": dstDir,
         "names":   []string{path.Base(srcPath)},
     }
 
-    // 添加详细的调试日志
-    fs.Debugf(nil, "Copy details: src_root=%s, dst_root=%s, src_path=%s, dst_path=%s", 
-        srcFs.root, f.root, srcPath, dstPath)
     fs.Debugf(nil, "Copy request data: %+v", data)
 
     // 发送复制请求
     var resp struct {
         Code    int    `json:"code"`
         Message string `json:"message"`
-        Data    string `json:"data"`  // 直接获取字符串响应
+        Data    string `json:"data"`
     }
 
-    err = f.pacer.Call(func() (bool, error) {
+    err := f.pacer.Call(func() (bool, error) {
         err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
-        if (err != nil) {
+        if err != nil {
             fs.Debugf(nil, "Copy request failed: %v", err)
             return shouldRetry(err), err
         }
-        if (resp.Code != 200) {
+        if resp.Code != 200 {
             return false, fmt.Errorf("copy failed with code %d: %s", resp.Code, resp.Message)
         }
         return false, nil
     })
 
-    if (err != nil) {
+    if err != nil {
         return nil, fmt.Errorf("failed to copy: %w", err)
     }
 
@@ -974,19 +972,29 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
     f.invalidateCache(path.Dir(remote))
 
     // 等待并验证文件复制完成
-    obj, err := f.waitForFileCompletion(ctx, remote, srcObj.size)
-    if (err != nil) {
-        return nil, err
+    startTime := time.Now()
+    const maxWaitTime = 30 * time.Second
+
+    for time.Since(startTime) < maxWaitTime {
+        obj, err := f.NewObject(ctx, remote)
+        if err == nil {
+            if obj.Size() == srcObj.size || srcObj.size == 0 {
+                return obj, nil
+            }
+            fs.Debugf(nil, "Size mismatch for %s: expected %d got %d",
+                remote, srcObj.size, obj.Size())
+        }
+        time.Sleep(time.Second)
     }
 
-    return obj, nil
+    return nil, fmt.Errorf("timeout waiting for copy completion of %s", remote)
 }
 
 // CopyDir 实现目录复制
 func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote string) error {
     // 确保源和目标都是 AList 类型
     srcAlist, ok := srcFs.(*Fs)
-    if (!ok) {
+    if !ok) {
         return fs.ErrorCantCopy
     }
 
