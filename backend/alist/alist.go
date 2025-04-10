@@ -944,7 +944,14 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
     fs.Debugf(nil, "Copy request data: %+v", data)
 
     // 发送复制请求
-    var resp requestResponse
+    var resp struct {
+        Code    int    `json:"code"`
+        Message string `json:"message"`
+        Data    struct {
+            TaskID string `json:"task_id"`
+        } `json:"data"`
+    }
+
     err = f.pacer.Call(func() (bool, error) {
         err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
         if err != nil {
@@ -958,25 +965,17 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         return nil, fmt.Errorf("failed to start copy: %w", err)
     }
 
-    // 清除缓存
-    f.invalidateCache(path.Dir(remote))
-
-    // 等待并验证文件复制是否成功
-    err = f.waitForFile(ctx, remote, srcObj.size)
+    // 等待任务完成
+    err = f.waitForCopyTask(ctx, resp.Data.TaskID)
     if err != nil {
         return nil, err
     }
 
-    // 返回新对象信息
-    return &Object{
-        fs:        f,
-        remote:    remote,
-        size:      srcObj.size,
-        modTime:   srcObj.modTime,
-        md5sum:    srcObj.md5sum,
-        sha1sum:   srcObj.sha1sum,
-        sha256sum: srcObj.sha256sum,
-    }, nil
+    // 清除缓存
+    f.invalidateCache(path.Dir(remote))
+
+    // 返回新对象
+    return f.NewObject(ctx, remote)
 }
 
 // CopyDir 实现目录复制
@@ -1151,6 +1150,75 @@ func (f *Fs) waitForFile(ctx context.Context, remote string, expectedSize int64)
         case <-ctx.Done():
             return ctx.Err()
         case <-time.After(checkInterval):
+        }
+    }
+}
+
+// 修改等待任务完成的函数
+func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
+    const (
+        checkInterval = time.Second
+        maxRetries = 3
+        timeout = 5 * time.Minute
+    )
+
+    timer := time.NewTimer(timeout)
+    defer timer.Stop()
+
+    ticker := time.NewTicker(checkInterval)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-timer.C:
+            return fmt.Errorf("copy task timeout after %v", timeout)
+        case <-ticker.C:
+            var resp struct {
+                Code    int    `json:"code"`
+                Message string `json:"message"`
+                Data    []struct {
+                    ID         string    `json:"id"`
+                    State      int       `json:"state"`
+                    Progress   float64   `json:"progress"`
+                    Error      string    `json:"error"`
+                    TotalBytes int64     `json:"total_bytes"`
+                    StartTime  time.Time `json:"start_time"`
+                    EndTime    time.Time `json:"end_time"`
+                } `json:"data"`
+            }
+
+            err := f.doCFRequestMust(ctx, "GET", apiTaskInfo, nil, &resp)
+            if err != nil {
+                fs.Debugf(nil, "Failed to check task status: %v", err)
+                continue
+            }
+
+            // 查找目标任务
+            for _, task := range resp.Data {
+                if task.ID == taskID {
+                    fs.Debugf(nil, "Task %s: state=%d progress=%.2f%% bytes=%d", 
+                        taskID, task.State, task.Progress, task.TotalBytes)
+
+                    switch task.State {
+                    case 2: // 成功完成
+                        return nil
+                    case 1: // 正在进行
+                        continue
+                    case 3: // 暂停
+                        continue
+                    case 4: // 失败
+                        return fmt.Errorf("copy task failed: %s", task.Error)
+                    case 5: // 取消
+                        return fmt.Errorf("copy task canceled")
+                    case 0: // 等待中
+                        continue
+                    default:
+                        fs.Debugf(nil, "Unknown task state: %d", task.State)
+                    }
+                }
+            }
         }
     }
 }
