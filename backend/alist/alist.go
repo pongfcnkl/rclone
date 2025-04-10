@@ -1064,7 +1064,7 @@ func (f *Fs) checkPath(ctx context.Context, path string) error {
     }
 
     // If parent doesn't exist, create it first
-    parent := filepath.Dir(path)
+    parent := path.Dir(path)
     if parent != "." && parent != "/" {
         err = f.checkPath(ctx, parent)
         if err != nil {
