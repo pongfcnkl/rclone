@@ -43,7 +43,7 @@ const (
 	apiGet    = "/api/fs/get"
 	apiMe     = "/api/me"
 	apiCopy   = "/api/task/copy"
-	apiTaskInfo = "/api/task/copy/info"
+	apiTaskInfo = "/api/task/copy/undone"  // 将 apiTaskInfo 改为未完成任务接口
 )
 
 func init() {
@@ -443,7 +443,7 @@ func (f *Fs) doCFRequestMust(ctx context.Context, method, endpoint string, data 
 	}
 	// Set common headers.
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept", "application/json")
 	resp, err := f.doCFRequest(req)
 	if err != nil {
 		return err
@@ -453,16 +453,27 @@ func (f *Fs) doCFRequestMust(ctx context.Context, method, endpoint string, data 
 			fs.Errorf(ctx, "Failed to close response body: %v", err)
 		}
 	}()
+	// 读取响应体
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(bodyBytes, response); err != nil {
-		return err
+
+	// 检查响应内容类型
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "application/json") {
+		// 记录非JSON响应内容用于调试
+		fs.Debugf(nil, "Unexpected response type %q with body: %s", contentType, string(bodyBytes))
+		return fmt.Errorf("unexpected content type: %s", contentType)
 	}
-	// Check for error codes in common response types.
+
+	// 尝试解析JSON
+	if err := json.Unmarshal(bodyBytes, response); err != nil {
+		return fmt.Errorf("failed to parse JSON response: %w, body: %s", err, string(bodyBytes))
+	}
+
+	// 检查API错误
 	if err := f.handleResponse(response); err != nil {
-		// If unauthorized, try to renew token and retry.
 		if err.Error() == "unauthorized access" {
 			f.tokenMu.Lock()
 			defer f.tokenMu.Unlock()
@@ -900,10 +911,10 @@ func (f *Fs) fetchUserAgent(ctx context.Context) error {
 	return nil
 }
 
-// Copy 实现单个对象的复制
+// Copy 函数修改
 func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
     srcObj, ok := src.(*Object)
-    if (!ok) {
+    if !ok {
         return nil, fs.ErrorObjectNotFound
     }
 
@@ -916,10 +927,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
     // 构造复制请求
     data := map[string]interface{}{
-        "src_dir": path.Dir(path.Join(f.root, srcObj.remote)),
-        "dst_dir": path.Dir(path.Join(f.root, remote)),
+        "src_dir": path.Join(f.root, path.Dir(srcObj.remote)),
+        "dst_dir": path.Join(f.root, path.Dir(remote)),
         "names":   []string{path.Base(srcObj.remote)},
     }
+
+    // 添加调试日志
+    fs.Debugf(nil, "Copy request data: %+v", data)
 
     // Retry logic for copy operation
     var resp struct {
@@ -932,24 +946,38 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
     err = f.pacer.Call(func() (bool, error) {
         err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
-        return shouldRetry(err), err
+        if err != nil {
+            // 添加响应内容调试
+            if strings.Contains(err.Error(), "invalid character") {
+                fs.Debugf(nil, "Invalid JSON response received: %v", err)
+                return true, err // 重试此类错误
+            }
+            return shouldRetry(err), err
+        }
+        return false, nil
     })
 
-    if (err != nil) {
+    if err != nil {
         return nil, fmt.Errorf("failed to start copy: %w", err)
     }
 
-    // Monitor copy progress with retries
+    // 添加任务ID调试日志
+    fs.Debugf(nil, "Copy task created with ID: %s", resp.Data.TaskID)
+
+    // Monitor copy progress with retries 
     err = f.pacer.Call(func() (bool, error) {
         err := f.waitForCopyTask(ctx, resp.Data.TaskID)
         return shouldRetry(err), err
     })
 
-    if (err != nil) {
+    if err != nil {
         return nil, fmt.Errorf("copy failed: %w", err)
     }
 
-    // 复制完成,返回新对象
+    // 清除缓存
+    f.invalidateCache(path.Dir(remote))
+
+    // 返回新对象
     return f.NewObject(ctx, remote)
 }
 
@@ -966,21 +994,23 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
         case <-ctx.Done():
             return ctx.Err()
         case <-time.After(checkInterval):
-            // 查询任务状态
+            // 查询未完成任务
             var resp struct {
-                Code    int       `json:"code"`
-                Message string    `json:"message"`
-                Data    copyTask  `json:"data"`
+                Code    int    `json:"code"`
+                Message string `json:"message"`
+                Data    []struct {
+                    ID        string  `json:"id"`
+                    State     int     `json:"state"` // 修改为int类型
+                    Progress  float64 `json:"progress"`
+                    Error     string  `json:"error"`
+                    TotalBytes int64  `json:"total_bytes"`
+                } `json:"data"`
             }
 
-            data := map[string]string{
-                "tid": taskID,
-            }
-
-            err := f.doCFRequestMust(ctx, "POST", apiTaskInfo, data, &resp)
-            if (err != nil) {
+            err := f.doCFRequestMust(ctx, "GET", apiTaskInfo, nil, &resp)
+            if err != nil {
                 retries++
-                if (retries > maxRetries) {
+                if retries > maxRetries {
                     return fmt.Errorf("failed to check copy status after %d retries: %w", retries, err)
                 }
                 continue
@@ -989,17 +1019,24 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
             // 重置重试计数
             retries = 0
 
-            // 检查任务状态
-            switch resp.Data.State {
-            case "succeeded":
-                return nil
-            case "failed":
-                return fmt.Errorf("copy failed: %s", resp.Data.Error)
-            case "canceled":
-                return fmt.Errorf("copy canceled")
-            default:
-                // 继续等待
-                fs.Debugf(nil, "Copy progress: %.2f%%", resp.Data.Progress)
+            // 在未完成任务列表中查找目标任务
+            for _, task := range resp.Data {
+                if task.ID == taskID {
+                    // 检查任务状态
+                    switch task.State {
+                    case 2: // succeeded
+                        return nil
+                    case 4: // failed 
+                        return fmt.Errorf("copy failed: %s", task.Error)
+                    case 5: // canceled
+                        return fmt.Errorf("copy canceled")
+                    default:
+                        // 继续等待,输出进度
+                        fs.Debugf(nil, "Copy progress: %.2f%%, Total bytes: %d", 
+                            task.Progress, task.TotalBytes)
+                    }
+                    break
+                }
             }
         }
     }
@@ -1009,19 +1046,19 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
 func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote string) error {
     // 确保源和目标都是 AList 类型
     srcAlist, ok := srcFs.(*Fs)
-    if !ok {
+    if (!ok) {
         return fs.ErrorCantCopy
     }
 
     // 创建目标目录
     err := f.Mkdir(ctx, dstRemote)
-    if err != nil {
+    if (err != nil) {
         return fmt.Errorf("failed to create destination directory: %w", err)
     }
 
     // 获取源目录中的所有文件
     entries, err := srcAlist.List(ctx, srcRemote)
-    if err != nil {
+    if (err != nil) {
         return fmt.Errorf("failed to list source directory: %w", err)
     }
 
@@ -1036,7 +1073,7 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
 
     // 并发复制所有文件
     for _, entry := range entries {
-        if obj, ok := entry.(fs.Object); ok {
+        if (obj, ok := entry.(fs.Object); ok) {
             wg.Add(1)
             go func(obj fs.Object) {
                 defer wg.Done()
@@ -1047,7 +1084,7 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
                 newRemote := path.Join(dstRemote, relPath)
 
                 _, err := f.Copy(ctx, obj, newRemote)
-                if err != nil {
+                if (err != nil) {
                     errMu.Lock()
                     copyErrors = append(copyErrors, fmt.Errorf("failed to copy %s: %w", obj.Remote(), err))
                     errMu.Unlock()
@@ -1060,7 +1097,7 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
     wg.Wait()
 
     // 检查是否有错误发生
-    if len(copyErrors) > 0 {
+    if (len(copyErrors) > 0) {
         return fmt.Errorf("multiple copy errors: %v", copyErrors)
     }
 
