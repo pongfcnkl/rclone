@@ -309,6 +309,12 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		CanHaveEmptyDirectories: true,
 	}).Fill(ctx, f)
 
+	// Check if root directory exists, create if not
+	err = f.checkRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error checking root directory: %w", err) 
+	}
+
 	return f, nil
 }
 
@@ -871,6 +877,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         return nil, fs.ErrorObjectNotFound
     }
 
+    // Ensure destination directory exists
+    dstDir := path.Dir(remote)
+    err := f.checkPath(ctx, dstDir) 
+    if err != nil {
+        return nil, fmt.Errorf("failed to check destination path: %w", err)
+    }
+
     // 构造复制请求
     data := map[string]interface{}{
         "src_dir": path.Dir(path.Join(f.root, srcObj.remote)),
@@ -878,22 +891,30 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         "names":   []string{path.Base(srcObj.remote)},
     }
 
-    // 发起复制请求
+    // Retry logic for copy operation
     var resp struct {
         Code    int    `json:"code"`
-        Message string `json:"message"` 
+        Message string `json:"message"`
         Data    struct {
             TaskID string `json:"task_id"`
         } `json:"data"`
     }
-    
-    err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
+
+    err = f.pacer.Call(func() (bool, error) {
+        err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
+        return shouldRetry(err), err
+    })
+
     if (err != nil) {
         return nil, fmt.Errorf("failed to start copy: %w", err)
     }
 
-    // 监控复制进度
-    err = f.waitForCopyTask(ctx, resp.Data.TaskID)
+    // Monitor copy progress with retries
+    err = f.pacer.Call(func() (bool, error) {
+        err := f.waitForCopyTask(ctx, resp.Data.TaskID)
+        return shouldRetry(err), err
+    })
+
     if (err != nil) {
         return nil, fmt.Errorf("copy failed: %w", err)
     }
@@ -1014,4 +1035,61 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
     }
 
     return nil
+}
+
+// Add new helper function
+func (f *Fs) checkRoot(ctx context.Context) error {
+    // Try to list root directory
+    _, err := f.List(ctx, "")
+    if err != nil {
+        // If directory doesn't exist, create it
+        if err == fs.ErrorDirNotFound {
+            return f.Mkdir(ctx, "")
+        }
+        return err
+    }
+    return nil
+}
+
+// Add new helper function
+func (f *Fs) checkPath(ctx context.Context, path string) error {
+    if path == "" {
+        return nil
+    }
+
+    // Check if directory exists
+    _, err := f.List(ctx, path)
+    if err == nil {
+        return nil
+    }
+
+    // If parent doesn't exist, create it first
+    parent := filepath.Dir(path)
+    if parent != "." && parent != "/" {
+        err = f.checkPath(ctx, parent)
+        if err != nil {
+            return err
+        }
+    }
+
+    // Create directory
+    return f.Mkdir(ctx, path)
+}
+
+// Add helper function for retry decisions
+func shouldRetry(err error) bool {
+    if err == nil {
+        return false
+    }
+    
+    // Add specific error types that should trigger retry
+    if strings.Contains(err.Error(), "directory not found") {
+        return true
+    }
+    if strings.Contains(err.Error(), "network error") {
+        return true
+    }
+    // Add other retryable error conditions as needed
+    
+    return false
 }
