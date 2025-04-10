@@ -888,13 +888,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
     }
     
     err := f.doCFRequestMust(ctx, "POST", apiCopy, data, &resp)
-    if err != nil {
+    if (err != nil) {
         return nil, fmt.Errorf("failed to start copy: %w", err)
     }
 
     // 监控复制进度
     err = f.waitForCopyTask(ctx, resp.Data.TaskID)
-    if err != nil {
+    if (err != nil) {
         return nil, fmt.Errorf("copy failed: %w", err)
     }
 
@@ -927,9 +927,9 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
             }
 
             err := f.doCFRequestMust(ctx, "POST", apiTaskInfo, data, &resp)
-            if err != nil {
+            if (err != nil) {
                 retries++
-                if retries > maxRetries {
+                if (retries > maxRetries) {
                     return fmt.Errorf("failed to check copy status after %d retries: %w", retries, err)
                 }
                 continue
@@ -974,8 +974,11 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
         return fmt.Errorf("failed to list source directory: %w", err)
     }
 
+    // 获取配置的并发传输数
+    ci := fs.GetConfig(ctx)
+    
     // 使用信号量控制并发复制
-    sem := make(chan struct{}, fs.Config.Transfers)
+    sem := make(chan struct{}, ci.Transfers)
     var wg sync.WaitGroup
     var copyErrors []error
     var errMu sync.Mutex
