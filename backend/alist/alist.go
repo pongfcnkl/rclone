@@ -1046,19 +1046,19 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
 func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote string) error {
     // 确保源和目标都是 AList 类型
     srcAlist, ok := srcFs.(*Fs)
-    if (!ok) {
+    if !ok {
         return fs.ErrorCantCopy
     }
 
     // 创建目标目录
     err := f.Mkdir(ctx, dstRemote)
-    if (err != nil) {
+    if err != nil {
         return fmt.Errorf("failed to create destination directory: %w", err)
     }
 
     // 获取源目录中的所有文件
     entries, err := srcAlist.List(ctx, srcRemote)
-    if (err != nil) {
+    if err != nil {
         return fmt.Errorf("failed to list source directory: %w", err)
     }
 
@@ -1073,7 +1073,7 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
 
     // 并发复制所有文件
     for _, entry := range entries {
-        if (obj, ok := entry.(fs.Object); ok) {
+        if obj, ok := entry.(fs.Object); ok {
             wg.Add(1)
             go func(obj fs.Object) {
                 defer wg.Done()
@@ -1084,7 +1084,7 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
                 newRemote := path.Join(dstRemote, relPath)
 
                 _, err := f.Copy(ctx, obj, newRemote)
-                if (err != nil) {
+                if err != nil {
                     errMu.Lock()
                     copyErrors = append(copyErrors, fmt.Errorf("failed to copy %s: %w", obj.Remote(), err))
                     errMu.Unlock()
@@ -1097,7 +1097,7 @@ func (f *Fs) CopyDir(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
     wg.Wait()
 
     // 检查是否有错误发生
-    if (len(copyErrors) > 0) {
+    if len(copyErrors) > 0 {
         return fmt.Errorf("multiple copy errors: %v", copyErrors)
     }
 
