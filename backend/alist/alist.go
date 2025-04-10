@@ -919,8 +919,10 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
     }
 
     // 确保源和目标路径不同 - 修改这部分逻辑
-    srcPath := srcObj.fs.root + "/" + srcObj.remote
-    dstPath := f.root + "/" + remote
+    srcFs := srcObj.fs
+    srcPath := path.Join(srcFs.root, srcObj.remote)
+    dstPath := path.Join(f.root, remote)
+    
     if srcPath == dstPath {
         fs.Debugf(nil, "Source and destination are identical: %s", srcPath)
         return srcObj, nil
@@ -933,14 +935,21 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         return nil, fmt.Errorf("failed to check destination path: %w", err)
     }
 
-    // 构造复制请求 - 修改路径处理
+    // 修正路径处理 - 使用 path.Clean 清理路径
+    cleanSrcPath := path.Clean(srcPath)
+    cleanDstPath := path.Clean(dstPath)
+
     data := map[string]interface{}{
-        "src_dir": path.Dir(srcPath),
-        "dst_dir": path.Dir(dstPath),
+        "src_dir": path.Dir(cleanSrcPath),
+        "dst_dir": path.Dir(cleanDstPath),
         "names":   []string{path.Base(srcObj.remote)},
     }
 
-    // 添加调试日志
+    // 添加详细的调试日志
+    fs.Debugf(nil, "Copy details: src=%s, dst=%s, name=%s", 
+        path.Dir(cleanSrcPath),
+        path.Dir(cleanDstPath),
+        path.Base(srcObj.remote))
     fs.Debugf(nil, "Copy request data: %+v", data)
 
     // 发送复制请求
@@ -965,17 +974,16 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
         return nil, fmt.Errorf("failed to start copy: %w", err)
     }
 
-    // 等待任务完成
-    err = f.waitForCopyTask(ctx, resp.Data.TaskID)
+    // 清除缓存
+    f.invalidateCache(path.Dir(remote))
+
+    // 等待并验证文件复制完成
+    obj, err := f.waitForFileCompletion(ctx, remote, srcObj.size)
     if err != nil {
         return nil, err
     }
 
-    // 清除缓存
-    f.invalidateCache(path.Dir(remote))
-
-    // 返回新对象
-    return f.NewObject(ctx, remote)
+    return obj, nil
 }
 
 // CopyDir 实现目录复制
@@ -1219,6 +1227,39 @@ func (f *Fs) waitForCopyTask(ctx context.Context, taskID string) error {
                     }
                 }
             }
+        }
+    }
+}
+
+// 添加新的等待函数
+func (f *Fs) waitForFileCompletion(ctx context.Context, remote string, expectedSize int64) (fs.Object, error) {
+    startTime := time.Now()
+    const (
+        maxWaitTime = 2 * time.Minute
+        checkInterval = 2 * time.Second
+    )
+
+    for {
+        if time.Since(startTime) > maxWaitTime {
+            return nil, fmt.Errorf("timeout waiting for file completion: %s", remote)
+        }
+
+        obj, err := f.NewObject(ctx, remote)
+        if err == nil {
+            if obj.Size() == expectedSize {
+                return obj, nil
+            }
+            fs.Debugf(nil, "File size mismatch for %s: expected %d, got %d", 
+                remote, expectedSize, obj.Size())
+        } else {
+            fs.Debugf(nil, "File not found yet: %s", remote)
+        }
+
+        select {
+        case <-ctx.Done():
+            return nil, ctx.Err()
+        case <-time.After(checkInterval):
+            continue
         }
     }
 }
