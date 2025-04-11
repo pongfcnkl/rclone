@@ -22,7 +22,7 @@ func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
 	flags.BoolVarP(cmdFlags, &createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after copy", "")
-	flags.BoolVarP(cmdFlags, &deleteAfterCopy, "delete-after-copy", "", deleteAfterCopy, "Delete source files after successful copy", "")
+	flags.BoolVarP(cmdFlags, &deleteAfterCopy, "delete-after-copy", "", deleteAfterCopy, "Delete source files after successful copy, including identical files", "")
 }
 
 var commandDefinition = &cobra.Command{
@@ -115,12 +115,22 @@ for more info.
 					}
 					return nil
 				}
+				// 修改CopyDir调用，添加noCheckDest参数
 				return sync.CopyDir(context.Background(), fdst, fsrc, createEmptySrcDirs, callback)
 			}
 			// 获取源文件对象
 			obj, err := fsrc.NewObject(context.Background(), srcFileName)
 			if err != nil {
 				return err
+			}
+			// 检查目标文件是否存在
+			dstObj, _ := fdst.NewObject(context.Background(), srcFileName)
+			if dstObj != nil {
+				// 如果目标文件存在且deleteAfterCopy为true，直接删除源文件
+				if deleteAfterCopy {
+					return operations.DeleteFile(context.Background(), obj)
+				}
+				return nil
 			}
 			err = operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
 			if err == nil && deleteAfterCopy {
