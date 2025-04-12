@@ -78,9 +78,10 @@ jobs:
           GOOS: linux
           GOARCH: arm
           GOARM: 7
+           
         run: |
-          go build -v -trimpath -ldflags "-s -X github.com/rclone/rclone/fs.Version=$(make version)" -o rclone-armv7l
-
+          go build -v -trimpath -ldflags "-s -X github.com/rclone/rclone/fs.Version=$(make version) -extldflags '-static'" -o rclone-armv7l
+          
       - name: Package armv7l binary
         run: |
           mkdir -p build/armv7l
