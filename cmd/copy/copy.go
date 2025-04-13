@@ -111,7 +111,12 @@ for more info.
 				// 定义回调函数，在文件复制完成后删除源文件
 				callback := func(obj fs.Object) error {
 					if deleteAfterCopy {
-						return operations.DeleteFile(context.Background(), obj)
+						// 检查目标文件是否存在且大小相同
+						dstObj, err := fdst.NewObject(context.Background(), obj.Remote())
+						if err == nil && dstObj != nil && obj.Size() == dstObj.Size() {
+							fs.Debugf(obj, "Deleting source file as it has same size as destination")
+							return operations.DeleteFile(context.Background(), obj)
+						}
 					}
 					return nil
 				}
