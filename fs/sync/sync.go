@@ -442,7 +442,23 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.W
 					if operations.SameObject(src, pair.Dst) {
 						fs.Logf(src, "Not removing source file as it is the same file as the destination")
 					} else if s.ci.IgnoreExisting {
-						fs.Debugf(src, "Not removing source file as destination file exists and --ignore-existing is set")
+						fs.Debugf(src, "Skipping as --ignore-existing is set")
+						return nil
+					} else if s.ci.SizeOnly {
+						if src.Size() == pair.Dst.Size() {
+							fs.Debugf(src, "Sizes identical")
+							if s.copyCallback != nil {
+								s.copyCallback(src)
+							}
+							return nil
+						}
+						fs.Debugf(src, "Sizes differ")
+					} else if SameObject(src, pair.Dst) {
+						fs.Debugf(src, "Unchanged skipping")
+						if s.copyCallback != nil {
+							s.copyCallback(src)
+						}
+						return nil
 					} else if s.checkFirst && s.ci.OrderBy != "" {
 						// If we want perfect ordering then use the transfers to delete the file
 						//
