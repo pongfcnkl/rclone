@@ -443,22 +443,20 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.W
 						fs.Logf(src, "Not removing source file as it is the same file as the destination")
 					} else if s.ci.IgnoreExisting {
 						fs.Debugf(src, "Skipping as --ignore-existing is set")
-						return
 					} else if s.ci.SizeOnly {
 						if src.Size() == pair.Dst.Size() {
 							fs.Debugf(src, "Sizes identical")
 							if s.copyCallback != nil {
 								s.copyCallback(src)
 							}
-							return
+						} else {
+							fs.Debugf(src, "Sizes differ")
 						}
-						fs.Debugf(src, "Sizes differ")
 					} else if operations.SameObject(src, pair.Dst) {
 						fs.Debugf(src, "Unchanged skipping")
 						if s.copyCallback != nil {
 							s.copyCallback(src)
 						}
-						return
 					} else if s.checkFirst && s.ci.OrderBy != "" {
 						// If we want perfect ordering then use the transfers to delete the file
 						//
@@ -471,6 +469,12 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.W
 						deleteFileErr := operations.DeleteFile(s.ctx, src)
 						s.processError(deleteFileErr)
 						s.logger(s.ctx, operations.TransferError, pair.Src, pair.Dst, deleteFileErr)
+					}
+				} else if s.copyCallback != nil {
+					// For copy command, call callback for identical files
+					if src.Size() == pair.Dst.Size() {
+						fs.Debugf(src, "Sizes identical")
+						s.copyCallback(src)
 					}
 				}
 			}
