@@ -504,7 +504,7 @@ func (s *syncCopyMove) pairRenamer(in *pipe, out *pipe, fraction int, wg *sync.W
 	}
 }
 
-// pairCopyO1 1rMove reads Objects on in and moves or copies them.
+// pairCopyO11rMove reads Objects on in and moves or copies them.
 func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs, fraction int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {

@@ -445,20 +445,18 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
     // 检查环境变量
     moveRm := os.Getenv("MoveRm")
     if moveRm == "true" {
-        // 不移动只删除重复文件
-        if dst != nil && !SameObject(src, dst) {
-            // Delete src
+        // 如果目标文件存在，则删除源文件并返回
+        if dst != nil {
+            fs.Debugf(src, "Destination exists, deleting source file")
             err = DeleteFile(ctx, src)
             if err != nil {
-                fs.Errorf(src, "Couldn't delete source: %v", err)
-                return newDst, err
+                return nil, fmt.Errorf("failed to delete source file: %w", err)
             }
-            fs.Infof(src, "Deleted source file: %s", src.String())
-            return newDst, nil
-        } else {
-            fs.Infof(src, "No duplicate file found in the destination folder or it is the same file.")
-            return newDst, nil
+            return dst, nil
         }
+        // 如果目标文件不存在，直接返回
+        fs.Debugf(src, "Destination does not exist, skipping move operation")
+        return nil, nil
     } else {
         // 原有的移动逻辑
         ci := fs.GetConfig(ctx)
