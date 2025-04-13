@@ -454,8 +454,10 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
                 return newDst, err
             }
             fs.Infof(src, "Deleted source file: %s", src.String())
+            return newDst, nil
         } else {
             fs.Infof(src, "No duplicate file found in the destination folder or it is the same file.")
+            return newDst, nil
         }
     } else {
         // 原有的移动逻辑
