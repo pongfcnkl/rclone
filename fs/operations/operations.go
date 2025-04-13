@@ -442,11 +442,12 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
         tr.Reset(ctx) // Instead of DryRun
         return newDst, nil
     }
+
     // 检查环境变量
     moveRm := os.Getenv("MoveRm")
     if moveRm == "true" {
-        // 如果目标文件存在，则删除源文件并返回
-        if dst != nil {
+        // 如果目标文件存在且不是同一个文件，则删除源文件
+        if dst != nil && !SameObject(src, dst) {
             fs.Debugf(src, "Destination exists, deleting source file")
             err = DeleteFile(ctx, src)
             if err != nil {
@@ -454,54 +455,54 @@ func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.
             }
             return dst, nil
         }
-        // 如果目标文件不存在，直接返回
-        fs.Debugf(src, "Destination does not exist, skipping move operation")
+        // 如果目标文件不存在或是同一个文件，直接返回
+        fs.Debugf(src, "Destination does not exist or is the same file, skipping move operation")
         return nil, nil
-    } else {
-        // 原有的移动逻辑
-        ci := fs.GetConfig(ctx)
-        if doMove := fdst.Features().Move; doMove != nil && (SameConfig(src.Fs(), fdst) || (SameRemoteType(src.Fs(), fdst) && (fdst.Features().ServerSideAcrossConfigs || ci.ServerSideAcrossConfigs))) {
-            if dst != nil {
-                remote = dst.Remote()
-                if !SameObject(src, dst) {
-                    err = DeleteFile(ctx, dst)
-                    if err != nil {
-                        return newDst, err
-                    }
-                } else if needsMoveCaseInsensitive(fdst, fdst, remote, src.Remote(), false) {
-                    doMove = func(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
-                        return MoveCaseInsensitive(ctx, fdst, fdst, remote, src.Remote(), false, src)
-                    }
+    }
+
+    // 原有的移动逻辑
+    ci := fs.GetConfig(ctx)
+    if doMove := fdst.Features().Move; doMove != nil && (SameConfig(src.Fs(), fdst) || (SameRemoteType(src.Fs(), fdst) && (fdst.Features().ServerSideAcrossConfigs || ci.ServerSideAcrossConfigs))) {
+        if dst != nil {
+            remote = dst.Remote()
+            if !SameObject(src, dst) {
+                err = DeleteFile(ctx, dst)
+                if err != nil {
+                    return newDst, err
                 }
             } else if needsMoveCaseInsensitive(fdst, fdst, remote, src.Remote(), false) {
                 doMove = func(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
                     return MoveCaseInsensitive(ctx, fdst, fdst, remote, src.Remote(), false, src)
                 }
             }
-            // 执行移动操作
-            newDst, err = doMove(ctx, src, remote)
-            if err != nil {
-                fs.Errorf(src, "Couldn't move: %v", err)
-                return newDst, err
+        } else if needsMoveCaseInsensitive(fdst, fdst, remote, src.Remote(), false) {
+            doMove = func(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+                return MoveCaseInsensitive(ctx, fdst, fdst, remote, src.Remote(), false, src)
             }
-            if newDst != nil {
-                tr.Done(ctx, nil)
-            }
-            return newDst, nil
         }
-
-        // Move not available, copy+delete instead
-        newDst, err = Copy(ctx, fdst, dst, remote, src)
+        // 执行移动操作
+        newDst, err = doMove(ctx, src, remote)
         if err != nil {
-            fs.Errorf(src, "Not deleting source as copy failed: %v", err)
+            fs.Errorf(src, "Couldn't move: %v", err)
             return newDst, err
         }
-
-        // Delete src if no error on copy
-        err = DeleteFile(ctx, src)
-        if err != nil {
-            fs.Errorf(src, "Failed to remove source after copy: %v", err)
+        if newDst != nil {
+            tr.Done(ctx, nil)
         }
+        return newDst, nil
+    }
+
+    // Move not available, copy+delete instead
+    newDst, err = Copy(ctx, fdst, dst, remote, src)
+    if err != nil {
+        fs.Errorf(src, "Not deleting source as copy failed: %v", err)
+        return newDst, err
+    }
+
+    // Delete src if no error on copy
+    err = DeleteFile(ctx, src)
+    if err != nil {
+        fs.Errorf(src, "Failed to remove source after copy: %v", err)
     }
 
     return newDst, nil
