@@ -126,10 +126,12 @@ for more info.
 			// 检查目标文件是否存在
 			dstObj, _ := fdst.NewObject(context.Background(), srcFileName)
 			if dstObj != nil {
-				// 如果目标文件存在且deleteAfterCopy为true，直接删除源文件
-				if deleteAfterCopy {
+				// 如果目标文件存在且大小相同，则删除源文件
+				if deleteAfterCopy && obj.Size() == dstObj.Size() {
+					fs.Debugf(obj, "Deleting source file as it has same size as destination")
 					return operations.DeleteFile(context.Background(), obj)
 				}
+				fs.Debugf(obj, "Skipping as unchanged")
 				return nil
 			}
 			err = operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
