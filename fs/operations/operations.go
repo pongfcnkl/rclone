@@ -1990,7 +1990,9 @@ func moveOrCopyFile(ctx context.Context, fdst fs.Fs, fsrc fs.Fs, dstFileName str
 	if !ci.NoCheckDest {
 		dstObj, err = fdst.NewObject(ctx, dstFileName)
 		if errors.Is(err, fs.ErrorObjectNotFound) {
-			dstObj = nil
+			// 如果目标文件不存在,跳过移动
+			fs.Debugf(srcObj, "Destination file not found, skipping move")
+			return nil
 		} else if err != nil {
 			logger(ctx, TransferError, nil, dstObj, err)
 			return err
@@ -2057,8 +2059,13 @@ func moveOrCopyFile(ctx context.Context, fdst fs.Fs, fsrc fs.Fs, dstFileName str
 		if ci.IgnoreExisting {
 			fs.Debugf(srcObj, "Not removing source file as destination file exists and --ignore-existing is set")
 			logger(ctx, Match, srcObj, dstObj, nil)
-		} else if !SameObject(srcObj, dstObj) {
+		} else if dstObj != nil && Equal(ctx, srcObj, dstObj) {
+			// 只有当目标文件存在且与源文件相同时,才删除源文件
 			err = DeleteFile(ctx, srcObj)
+			logger(ctx, Match, srcObj, dstObj, nil)
+		} else {
+			// 目标文件不存在或与源文件不同,不删除源文件
+			fs.Debugf(srcObj, "Not removing source file as destination file does not exist or is different")
 			logger(ctx, Differ, srcObj, dstObj, nil)
 		}
 	}
