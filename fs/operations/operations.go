@@ -1989,20 +1989,17 @@ func moveOrCopyFile(ctx context.Context, fdst fs.Fs, fsrc fs.Fs, dstFileName str
 	var dstObj fs.Object
 	if !ci.NoCheckDest {
 		dstObj, err = fdst.NewObject(ctx, dstFileName)
-		if errors.Is(err, fs.ErrorObjectNotFound) {
-			// 如果目标文件不存在,跳过移动
+		if !cp && errors.Is(err, fs.ErrorObjectNotFound) {
+			// 如果是move操作且目标文件不存在,跳过移动
 			fs.Debugf(srcObj, "Destination file not found, skipping move")
 			return nil
-		} else if err != nil {
+		} else if err != nil && !errors.Is(err, fs.ErrorObjectNotFound) {
 			logger(ctx, TransferError, nil, dstObj, err)
 			return err
 		}
 	}
 
 	// Special case for changing case of a file on a case insensitive remote
-	// This will move the file to a temporary name then
-	// move it back to the intended destination. This is required
-	// to avoid issues with certain remotes and avoid file deletion.
 	if needsMoveCaseInsensitive(fdst, fsrc, dstFileName, srcFileName, cp) {
 		tr := accounting.Stats(ctx).NewTransfer(srcObj, fdst)
 		defer func() {
