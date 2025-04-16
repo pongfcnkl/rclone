@@ -350,10 +350,14 @@ jobs:
           if-no-files-found: ignore
           path: |
             build/${{ matrix.job_name }}/
-            build/${{ matrix.job_name }}/*amd64.zip
-            build/${{ matrix.job_name }}/*arm64.zip
-            build/*amd64.zip
-            build/*arm64.zip
+            build/${{ matrix.job_name }}/*.zip
+            build/${{ matrix.job_name }}/*.deb
+            build/${{ matrix.job_name }}/*.rpm
+            build/${{ matrix.job_name }}/*.tar.gz
+            build/*.zip
+            build/*.deb
+            build/*.rpm
+            build/*.tar.gz
 
   # lint:
   #   if: inputs.manual || (github.repository == 'pongfcnkl/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
