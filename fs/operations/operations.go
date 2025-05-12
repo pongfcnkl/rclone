@@ -1971,14 +1971,20 @@ func moveOrCopyFile(ctx context.Context, fdst fs.Fs, fsrc fs.Fs, dstFileName str
 		return nil
 	}
 
-	// 查找源对象
+	// Choose operations
+	Op := MoveTransfer
+	if cp {
+		Op = Copy
+	}
+
+	// Find src object
 	srcObj, err := fsrc.NewObject(ctx, srcFileName)
 	if err != nil {
 		logger(ctx, TransferError, srcObj, nil, err)
 		return err
 	}
 
-	// 查找目标对象
+	// Find dst object if it exists
 	var dstObj fs.Object
 	if !ci.NoCheckDest {
 		dstObj, err = fdst.NewObject(ctx, dstFileName)
@@ -1990,19 +1996,72 @@ func moveOrCopyFile(ctx context.Context, fdst fs.Fs, fsrc fs.Fs, dstFileName str
 		}
 	}
 
-	// 只在目标文件存在且不是同一个文件时，删除源文件
-	if dstObj != nil && !SameObject(srcObj, dstObj) {
-		err = DeleteFile(ctx, srcObj)
-		if err != nil {
-			logger(ctx, TransferError, srcObj, dstObj, err)
-			return err
-		}
-		fs.Infof(srcObj, "Deleted source file: %s", srcObj.String())
-	} else {
-		fs.Infof(srcObj, "No duplicate file found in the destination folder or it is the same file. Nothing to do.")
+	// Special case for changing case of a file on a case insensitive remote
+	// This will move the file to a temporary name then
+	// move it back to the intended destination. This is required
+	// to avoid issues with certain remotes and avoid file deletion.
+	if needsMoveCaseInsensitive(fdst, fsrc, dstFileName, srcFileName, cp) {
+		tr := accounting.Stats(ctx).NewTransfer(srcObj, fdst)
+		defer func() {
+			tr.Done(ctx, err)
+		}()
+		_, err = MoveCaseInsensitive(ctx, fdst, fsrc, dstFileName, srcFileName, cp, srcObj)
+		return err
 	}
 
-	return nil
+	var backupDir fs.Fs
+	var copyDestDir []fs.Fs
+	if ci.BackupDir != "" || ci.Suffix != "" {
+		backupDir, err = BackupDir(ctx, fdst, fsrc, srcFileName)
+		if err != nil {
+			return fmt.Errorf("creating Fs for --backup-dir failed: %w", err)
+		}
+	}
+	if len(ci.CompareDest) > 0 {
+		copyDestDir, err = GetCompareDest(ctx)
+		if err != nil {
+			return err
+		}
+	} else if len(ci.CopyDest) > 0 {
+		copyDestDir, err = GetCopyDest(ctx, fdst)
+		if err != nil {
+			return err
+		}
+	}
+	needTransfer := NeedTransfer(ctx, dstObj, srcObj)
+	if needTransfer {
+		NoNeedTransfer, err := CompareOrCopyDest(ctx, fdst, dstObj, srcObj, copyDestDir, backupDir)
+		if err != nil {
+			return err
+		}
+		if NoNeedTransfer {
+			needTransfer = false
+		}
+	}
+	if needTransfer {
+		// If destination already exists, then we must move it into --backup-dir if required
+		if dstObj != nil && backupDir != nil {
+			err = MoveBackupDir(ctx, backupDir, dstObj)
+			if err != nil {
+				logger(ctx, TransferError, dstObj, nil, err)
+				return fmt.Errorf("moving to --backup-dir failed: %w", err)
+			}
+			// If successful zero out the dstObj as it is no longer there
+			logger(ctx, MissingOnDst, dstObj, nil, nil)
+			dstObj = nil
+		}
+
+		_, err = Op(ctx, fdst, dstObj, dstFileName, srcObj)
+	} else if !cp {
+		if ci.IgnoreExisting {
+			fs.Debugf(srcObj, "Not removing source file as destination file exists and --ignore-existing is set")
+			logger(ctx, Match, srcObj, dstObj, nil)
+		} else if !SameObject(srcObj, dstObj) {
+			err = DeleteFile(ctx, srcObj)
+			logger(ctx, Differ, srcObj, dstObj, nil)
+		}
+	}
+	return err
 }
 
 // MoveFile moves a single file possibly to a new name
