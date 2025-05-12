@@ -138,8 +138,7 @@ jobs:
             os: macos-latest
             go: '>=1.23.0-rc.1'
             gotags: 'cmount,noselfupdate'
-            cgo: '0'
-            build_flags: '-include "^darwin/amd64"'
+            build_flags: '-include "^darwin/amd64" -cgo'
             quicktest: true
             racequicktest: true
             deploy: true
@@ -148,8 +147,7 @@ jobs:
             os: macos-latest
             go: '>=1.23.0-rc.1'
             gotags: 'cmount,noselfupdate'
-            cgo: '0'
-            build_flags: '-include "^darwin/arm64" -macos-arch arm64'
+            build_flags: '-include "^darwin/arm64" -cgo -macos-arch arm64 -cgo-cflags=-I/usr/local/include -cgo-ldflags=-L/usr/local/lib'
             deploy: true
 
           - job_name: windows
