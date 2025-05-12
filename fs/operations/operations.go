@@ -425,39 +425,39 @@ func MoveTransfer(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string,
 // move - see Move for help
 
 func move(ctx context.Context, fdst fs.Fs, dst fs.Object, remote string, src fs.Object, isTransfer bool) (newDst fs.Object, err error) {
-    var tr *accounting.Transfer
-    if isTransfer {
-        tr = accounting.Stats(ctx).NewTransfer(src, fdst)
-    } else {
-        tr = accounting.Stats(ctx).NewCheckingTransfer(src, "moving")
-    }
-    defer func() {
-        if err == nil {
-            accounting.Stats(ctx).Renames(1)
-        }
-        tr.Done(ctx, err)
-    }()
-    newDst = dst
-    if SkipDestructive(ctx, src, "move") {
-        in := tr.Account(ctx, nil)
-        in.DryRun(src.Size())
-        return newDst, nil
-    }
+	var tr *accounting.Transfer
+	if isTransfer {
+		tr = accounting.Stats(ctx).NewTransfer(src, fdst)
+	} else {
+		tr = accounting.Stats(ctx).NewCheckingTransfer(src, "moving")
+	}
+	defer func() {
+		if err == nil {
+			accounting.Stats(ctx).Renames(1)
+		}
+		tr.Done(ctx, err)
+	}()
+	newDst = dst
+	if SkipDestructive(ctx, src, "move") {
+		in := tr.Account(ctx, nil)
+		in.DryRun(src.Size())
+		return newDst, nil
+	}
 
-    // Check if destination file exists and is not the same as the source file
-    if dst != nil && !SameObject(src, dst) {
-        // Delete src
-        err = DeleteFile(ctx, src)
-        if err != nil {
-            fs.Errorf(src, "Couldn't delete source: %v", err)
-            return newDst, err
-        }
-        fs.Infof(src, "Deleted source file: %s", src.String())
-    } else {
-        fs.Infof(src, "No duplicate file found in the destination folder or it is the same file.")
-    }
+	// Check if destination file exists and is not the same as the source file
+	if dst != nil && !SameObject(src, dst) {
+		// Delete src
+		err = DeleteFile(ctx, src)
+		if err != nil {
+			fs.Errorf(src, "Couldn't delete source: %v", err)
+			return newDst, err
+		}
+		fs.Infof(src, "Deleted source file: %s", src.String())
+	} else {
+		fs.Infof(src, "No duplicate file found in the destination folder or it is the same file.")
+	}
 
-    return newDst, nil
+	return newDst, nil
 }
 
 // CanServerSideMove returns true if fdst support server-side moves or
