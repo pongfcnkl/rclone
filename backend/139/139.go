@@ -424,7 +424,6 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	if parentDir == "." {
 		parentDir = ""
 	}
-	fileName := path.Base(remote)
 
 	// List parent directory
 	entries, err := f.List(ctx, parentDir)
