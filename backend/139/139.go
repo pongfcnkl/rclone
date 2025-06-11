@@ -24,6 +24,7 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/random"
 	"github.com/rclone/rclone/lib/rest"
+	"github.com/rclone/rclone/lib/pacer"
 )
 
 const (
@@ -36,6 +37,11 @@ const (
 	// API相关常量
 	apiURL = "https://yun.139.com"
 	personalAPIURL = "https://personal-kd-njs.yun.139.com"
+
+	// Pacer相关常量
+	minSleep        = 100 * time.Millisecond
+	maxSleep        = 2 * time.Second
+	decayConstant   = 2 // bigger for slower decay, exponential
 )
 
 // Register with Fs
@@ -94,7 +100,7 @@ type Fs struct {
 	features *fs.Features
 	srv      *rest.Client
 	account  string
-	pacer    *rest.Pacer
+	pacer    *fs.Pacer
 }
 
 // Object describes a 139 cloud storage object
@@ -180,7 +186,7 @@ func calSign(body, ts, randStr string) string {
 }
 
 // refreshToken refreshes the authorization token
-func (f *Fs) refreshToken() error {
+func (f *Fs) refreshToken(ctx context.Context) error {
 	decode, err := base64.StdEncoding.DecodeString(f.opt.Authorization)
 	if err != nil {
 		return fmt.Errorf("authorization decode failed: %v", err)
@@ -226,9 +232,10 @@ func (f *Fs) refreshToken() error {
 
 	var result []byte
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallXML(&opts, nil, &resp)
+		resp, err := f.srv.CallXML(ctx, &opts, nil, &resp)
 		if err != nil {
-			return shouldRetry(err), err
+			retry, err := shouldRetry(err)
+			return retry, err
 		}
 		result = resp
 		return false, nil
@@ -247,7 +254,7 @@ func (f *Fs) refreshToken() error {
 }
 
 // request makes an API request to 139 cloud
-func (f *Fs) request(opts *rest.Opts) ([]byte, error) {
+func (f *Fs) request(ctx context.Context, opts *rest.Opts) ([]byte, error) {
 	// Add common headers
 	randStr := random.String(16)
 	ts := time.Now().Format("2006-01-02 15:04:05")
@@ -285,9 +292,10 @@ func (f *Fs) request(opts *rest.Opts) ([]byte, error) {
 	var result []byte
 	var resp BaseResp
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallJSON(opts, &resp, &result)
+		resp, err := f.srv.CallJSON(ctx, opts, &resp, &result)
 		if err != nil {
-			return shouldRetry(err), err
+			retry, err := shouldRetry(err)
+			return retry, err
 		}
 		result = resp
 		return false, nil
@@ -324,7 +332,7 @@ func shouldRetry(err error) (bool, error) {
 }
 
 // listDir lists the directory contents
-func (f *Fs) listDir(dirID string) ([]FileItem, error) {
+func (f *Fs) listDir(ctx context.Context, dirID string) ([]FileItem, error) {
 	var items []FileItem
 	nextPageCursor := ""
 
@@ -345,7 +353,7 @@ func (f *Fs) listDir(dirID string) ([]FileItem, error) {
 		}
 
 		var resp ListResp
-		result, err := f.request(&opts)
+		result, err := f.request(ctx, &opts)
 		if err != nil {
 			return nil, err
 		}
@@ -367,7 +375,7 @@ func (f *Fs) listDir(dirID string) ([]FileItem, error) {
 }
 
 // List implements fs.Fs
-func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
+func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	// Get directory ID from path
 	dirID := f.opt.RootFolderID
 	if dir != "" {
@@ -376,7 +384,7 @@ func (f *Fs) List(dir string) (entries fs.DirEntries, err error) {
 	}
 
 	// List directory contents
-	items, err := f.listDir(dirID)
+	items, err := f.listDir(ctx, dirID)
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +422,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	fileName := path.Base(remote)
 
 	// List parent directory
-	entries, err := f.List(parentDir)
+	entries, err := f.List(ctx, parentDir)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +441,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 }
 
 // NewFs constructs an Fs from the path, container:path
-func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
+func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
@@ -451,6 +459,9 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Create REST client
 	f.srv = rest.NewClient(fs.Config.Client())
 	f.srv.SetRoot(apiURL)
+
+	// Create pacer
+	f.pacer = fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant)))
 
 	// Set up features
 	f.features = (&fs.Features{
@@ -608,6 +619,12 @@ func (o *Object) MimeType(ctx context.Context) string {
 // ID returns the ID of the Object if known, or "" if not
 func (o *Object) ID() string {
 	return o.id
+}
+
+// SetModTime implements fs.Object
+func (o *Object) SetModTime(ctx context.Context, t time.Time) error {
+	// TODO: Implement set mod time
+	return fs.ErrorCantSetModTime
 }
 
 // Check the interfaces are satisfied
