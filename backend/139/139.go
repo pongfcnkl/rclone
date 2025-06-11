@@ -484,16 +484,35 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 // initialize initializes the Fs
 func (f *Fs) initialize() error {
 	// Decode authorization
+	if f.opt.Authorization == "" {
+		return fmt.Errorf("authorization is empty")
+	}
+
 	decode, err := base64.StdEncoding.DecodeString(f.opt.Authorization)
 	if err != nil {
-		return fmt.Errorf("authorization decode failed: %v", err)
+		return fmt.Errorf("authorization decode failed: %v (please check if the token is valid base64 encoded)", err)
 	}
 
 	decodeStr := string(decode)
 	splits := strings.Split(decodeStr, ":")
-	if len(splits) < 2 {
-		return fmt.Errorf("authorization is invalid, splits < 2")
+	if len(splits) < 3 {
+		return fmt.Errorf("authorization is invalid: expected format 'client_id:account:token|expire_time|...', got %d parts", len(splits))
 	}
+
+	tokenParts := strings.Split(splits[2], "|")
+	if len(tokenParts) < 4 {
+		return fmt.Errorf("authorization token is invalid: expected format 'token|expire_time|...', got %d parts", len(tokenParts))
+	}
+
+	expiration, err := strconv.ParseInt(tokenParts[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("authorization token expiration time is invalid: %v", err)
+	}
+
+	if expiration < time.Now().UnixMilli() {
+		return fmt.Errorf("authorization token has expired")
+	}
+
 	f.account = splits[1]
 
 	// Set root folder ID based on type
@@ -508,12 +527,17 @@ func (f *Fs) initialize() error {
 		}
 	case MetaGroup:
 		if f.opt.RootFolderID == "" {
+			if f.opt.CloudID == "" {
+				return fmt.Errorf("cloud_id is required for group cloud type")
+			}
 			f.opt.RootFolderID = f.opt.CloudID
 		}
 	case MetaFamily:
-		// No default root folder ID for family cloud
+		if f.opt.CloudID == "" {
+			return fmt.Errorf("cloud_id is required for family cloud type")
+		}
 	default:
-		return fmt.Errorf("unsupported cloud type: %s", f.opt.CloudType)
+		return fmt.Errorf("unsupported cloud type: %s (supported types: personal, family, group, personal_new)", f.opt.CloudType)
 	}
 
 	return nil
