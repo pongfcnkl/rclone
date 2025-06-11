@@ -1,6 +1,7 @@
 package _139
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/base64"
@@ -230,14 +231,12 @@ func (f *Fs) refreshToken(ctx context.Context) error {
 		},
 	}
 
-	var result []byte
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallXML(ctx, &opts, nil, &resp)
+		_, err := f.srv.CallXML(ctx, &opts, nil, &resp)
 		if err != nil {
 			retry, err := shouldRetry(err)
 			return retry, err
 		}
-		result = resp
 		return false, nil
 	})
 
@@ -292,12 +291,11 @@ func (f *Fs) request(ctx context.Context, opts *rest.Opts) ([]byte, error) {
 	var result []byte
 	var resp BaseResp
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallJSON(ctx, opts, &resp, &result)
+		_, err := f.srv.CallJSON(ctx, opts, &resp, &result)
 		if err != nil {
 			retry, err := shouldRetry(err)
 			return retry, err
 		}
-		result = resp
 		return false, nil
 	})
 
@@ -337,19 +335,26 @@ func (f *Fs) listDir(ctx context.Context, dirID string) ([]FileItem, error) {
 	nextPageCursor := ""
 
 	for {
+		body := map[string]interface{}{
+			"imageThumbnailStyleList": []string{"Small", "Large"},
+			"orderBy":                 "updated_at",
+			"orderDirection":          "DESC",
+			"pageInfo": map[string]interface{}{
+				"pageCursor": nextPageCursor,
+				"pageSize":   100,
+			},
+			"parentFileId": dirID,
+		}
+
+		bodyBytes, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+
 		opts := rest.Opts{
 			Method: "POST",
 			Path:   "/hcy/file/list",
-			Body: map[string]interface{}{
-				"imageThumbnailStyleList": []string{"Small", "Large"},
-				"orderBy":                 "updated_at",
-				"orderDirection":          "DESC",
-				"pageInfo": map[string]interface{}{
-					"pageCursor": nextPageCursor,
-					"pageSize":   100,
-				},
-				"parentFileId": dirID,
-			},
+			Body:   bytes.NewReader(bodyBytes),
 		}
 
 		var resp ListResp
@@ -457,7 +462,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	// Create REST client
-	f.srv = rest.NewClient(fs.Config.Client())
+	f.srv = rest.NewClient(nil)
 	f.srv.SetRoot(apiURL)
 
 	// Create pacer
@@ -468,7 +473,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		CanHaveEmptyDirectories: true,
 		ReadMimeType:            true,
 		WriteMimeType:           true,
-	}).Fill(f)
+	}).Fill(ctx, f)
 
 	// Initialize the Fs
 	err = f.initialize()
@@ -627,10 +632,24 @@ func (o *Object) SetModTime(ctx context.Context, t time.Time) error {
 	return fs.ErrorCantSetModTime
 }
 
+// String returns a description of the Object
+func (o *Object) String() string {
+	if o == nil {
+		return "<nil>"
+	}
+	return o.remote
+}
+
+// Storable returns whether this object is storable
+func (o *Object) Storable() bool {
+	return true
+}
+
 // Check the interfaces are satisfied
 var (
 	_ fs.Fs        = (*Fs)(nil)
 	_ fs.Object    = (*Object)(nil)
 	_ fs.MimeTyper = (*Object)(nil)
 	_ fs.IDer      = (*Object)(nil)
+	_ fs.DirEntry  = (*Object)(nil)
 )
