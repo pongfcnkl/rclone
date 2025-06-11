@@ -194,28 +194,36 @@ func (f *Fs) refreshToken(ctx context.Context) error {
 	decodeStr := string(decode)
 	splits := strings.Split(decodeStr, ":")
 	if len(splits) < 3 {
-		return fmt.Errorf("authorization is invalid, splits < 3")
+		return fmt.Errorf("authorization is invalid: expected format 'client_id:account:token|expire_time|...', got %d parts", len(splits))
 	}
 
-	strs := strings.Split(splits[2], "|")
-	if len(strs) < 4 {
-		return fmt.Errorf("authorization is invalid, strs < 4")
+	tokenParts := strings.Split(splits[2], "|")
+	if len(tokenParts) < 4 {
+		return fmt.Errorf("authorization token is invalid: expected format 'token|expire_time|...', got %d parts", len(tokenParts))
 	}
 
-	expiration, err := strconv.ParseInt(strs[3], 10, 64)
+	expiration, err := strconv.ParseInt(tokenParts[1], 10, 64)
 	if err != nil {
-		return fmt.Errorf("authorization is invalid")
+		return fmt.Errorf("authorization token expiration time is invalid: %v", err)
 	}
 
-	expiration -= time.Now().UnixMilli()
+	now := time.Now().UnixMilli()
+	expiration -= now
+	if expiration < 0 {
+		return fmt.Errorf("authorization token has expired (expired at %s)", time.UnixMilli(expiration+now).Format("2006-01-02 15:04:05"))
+	}
+
+	// 如果令牌还有超过15天的有效期，不需要刷新
 	if expiration > 1000*60*60*24*15 {
-		// Token有效期大于15天无需刷新
 		return nil
 	}
-	if expiration < 0 {
-		return fmt.Errorf("authorization has expired")
+
+	// 如果令牌还有超过1小时的有效期，不需要刷新
+	if expiration > 1000*60*60 {
+		return nil
 	}
 
+	// 尝试刷新令牌
 	url := "https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do"
 	var resp RefreshTokenResp
 	reqBody := fmt.Sprintf("<root><token>%s</token><account>%s</account><clienttype>656</clienttype></root>", splits[2], splits[1])
@@ -239,19 +247,54 @@ func (f *Fs) refreshToken(ctx context.Context) error {
 	})
 
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to refresh token: %v", err)
 	}
 
 	if resp.Return != "0" {
-		return fmt.Errorf("failed to refresh token: %s", resp.Desc)
+		return fmt.Errorf("failed to refresh token: %s (return code: %s)", resp.Desc, resp.Return)
 	}
 
-	f.opt.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + resp.Token))
+	// 更新令牌
+	newToken := base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + resp.Token))
+	f.opt.Authorization = newToken
+
+	// 验证新令牌
+	decode, err = base64.StdEncoding.DecodeString(newToken)
+	if err != nil {
+		return fmt.Errorf("new token validation failed: %v", err)
+	}
+
+	decodeStr = string(decode)
+	splits = strings.Split(decodeStr, ":")
+	if len(splits) < 3 {
+		return fmt.Errorf("new token validation failed: invalid format")
+	}
+
+	tokenParts = strings.Split(splits[2], "|")
+	if len(tokenParts) < 4 {
+		return fmt.Errorf("new token validation failed: invalid token format")
+	}
+
+	expiration, err = strconv.ParseInt(tokenParts[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("new token validation failed: invalid expiration time")
+	}
+
+	if expiration < time.Now().UnixMilli() {
+		return fmt.Errorf("new token validation failed: token already expired")
+	}
+
 	return nil
 }
 
 // request makes an API request to 139 cloud
 func (f *Fs) request(ctx context.Context, opts *rest.Opts) ([]byte, error) {
+	// Try to refresh token if needed
+	err := f.refreshToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("token refresh failed: %v", err)
+	}
+
 	// Add common headers
 	randStr := random.String(16)
 	ts := time.Now().Format("2006-01-02 15:04:05")
@@ -498,30 +541,63 @@ func (f *Fs) initialize() error {
 		return fmt.Errorf("authorization is empty")
 	}
 
-	decode, err := base64.StdEncoding.DecodeString(f.opt.Authorization)
+	// 检查令牌格式
+	if !strings.HasPrefix(f.opt.Authorization, "Basic ") {
+		f.opt.Authorization = "Basic " + f.opt.Authorization
+	}
+
+	// 移除 "Basic " 前缀
+	auth := strings.TrimPrefix(f.opt.Authorization, "Basic ")
+
+	// 尝试解码
+	decode, err := base64.StdEncoding.DecodeString(auth)
 	if err != nil {
-		return fmt.Errorf("authorization decode failed: %v (please check if the token is valid base64 encoded)", err)
+		// 提供更详细的错误信息
+		return fmt.Errorf("authorization decode failed: %v (please check if the token is valid base64 encoded and starts with 'Basic ')", err)
 	}
 
 	decodeStr := string(decode)
 	splits := strings.Split(decodeStr, ":")
 	if len(splits) < 3 {
-		return fmt.Errorf("authorization is invalid: expected format 'client_id:account:token|expire_time|...', got %d parts", len(splits))
+		return fmt.Errorf("authorization is invalid: expected format 'client_id:account:token|expire_time|...', got %d parts (example: 'client_id:account:token|expire_time|other_info')", len(splits))
 	}
 
 	tokenParts := strings.Split(splits[2], "|")
 	if len(tokenParts) < 4 {
-		return fmt.Errorf("authorization token is invalid: expected format 'token|expire_time|...', got %d parts", len(tokenParts))
+		return fmt.Errorf("authorization token is invalid: expected format 'token|expire_time|...', got %d parts (example: 'token|expire_time|other_info|...')", len(tokenParts))
 	}
 
+	// 解析过期时间
 	expiration, err := strconv.ParseInt(tokenParts[1], 10, 64)
 	if err != nil {
-		return fmt.Errorf("authorization token expiration time is invalid: %v", err)
+		return fmt.Errorf("authorization token expiration time is invalid: %v (expected a valid timestamp)", err)
 	}
 
-	if expiration < time.Now().UnixMilli() {
-		return fmt.Errorf("authorization token has expired")
+	// 检查过期时间格式
+	now := time.Now().UnixMilli()
+	expTime := time.UnixMilli(expiration)
+	
+	// 如果过期时间小于当前时间，但差值小于1小时，可能是时区问题，尝试调整
+	if expiration < now {
+		// 检查是否是秒级时间戳（而不是毫秒级）
+		if expiration > 1000000000 && expiration < 1000000000000 {
+			expiration = expiration * 1000 // 转换为毫秒
+			expTime = time.UnixMilli(expiration)
+		}
+		
+		// 如果仍然过期，返回错误
+		if expiration < now {
+			return fmt.Errorf("authorization token has expired (expired at %s, current time: %s)", 
+				expTime.Format("2006-01-02 15:04:05"),
+				time.UnixMilli(now).Format("2006-01-02 15:04:05"))
+		}
 	}
+
+	// 打印调试信息
+	fmt.Printf("Token info:\n")
+	fmt.Printf("  Expiration time: %s\n", expTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("  Current time: %s\n", time.UnixMilli(now).Format("2006-01-02 15:04:05"))
+	fmt.Printf("  Time remaining: %v\n", expTime.Sub(time.UnixMilli(now)))
 
 	f.account = splits[1]
 
