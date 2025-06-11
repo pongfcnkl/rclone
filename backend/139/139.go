@@ -2,7 +2,9 @@ package _139
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,7 +24,6 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/random"
 	"github.com/rclone/rclone/lib/rest"
-	"github.com/rclone/rclone/lib/utils"
 )
 
 const (
@@ -159,6 +160,13 @@ func encodeURIComponent(str string) string {
 	return r
 }
 
+// getMD5EncodeStr returns MD5 hash of string
+func getMD5EncodeStr(str string) string {
+	h := md5.New()
+	h.Write([]byte(str))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // calSign calculates the signature for API request
 func calSign(body, ts, randStr string) string {
 	body = encodeURIComponent(body)
@@ -166,8 +174,8 @@ func calSign(body, ts, randStr string) string {
 	sort.Strings(strs)
 	body = strings.Join(strs, "")
 	body = base64.StdEncoding.EncodeToString([]byte(body))
-	res := utils.GetMD5EncodeStr(body) + utils.GetMD5EncodeStr(ts+":"+randStr)
-	res = strings.ToUpper(utils.GetMD5EncodeStr(res))
+	res := getMD5EncodeStr(body) + getMD5EncodeStr(ts+":"+randStr)
+	res = strings.ToUpper(getMD5EncodeStr(res))
 	return res
 }
 
