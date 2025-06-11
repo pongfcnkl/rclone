@@ -267,7 +267,9 @@ func (f *Fs) request(ctx context.Context, opts *rest.Opts) ([]byte, error) {
 		svcType = "2"
 	}
 
-	opts.ExtraHeaders = map[string]string{
+	// Create a new opts to avoid modifying the original
+	newOpts := *opts
+	newOpts.ExtraHeaders = map[string]string{
 		"Accept":               "application/json, text/plain, */*",
 		"Authorization":        "Basic " + f.opt.Authorization,
 		"CMS-DEVICE":          "default",
@@ -289,10 +291,13 @@ func (f *Fs) request(ctx context.Context, opts *rest.Opts) ([]byte, error) {
 	var result []byte
 	var resp BaseResp
 	err = f.pacer.Call(func() (bool, error) {
-		_, err := f.srv.CallJSON(ctx, opts, &resp, &result)
+		resp, err := f.srv.CallJSON(ctx, &newOpts, &resp, &result)
 		if err != nil {
 			retry, err := shouldRetry(err)
 			return retry, err
+		}
+		if resp.StatusCode >= 400 {
+			return true, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, resp.Status)
 		}
 		return false, nil
 	})
@@ -458,12 +463,17 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		opt:  opt,
 	}
 
-	// Create REST client
-	f.srv = rest.NewClient(nil)
+	// Create REST client with proper configuration
+	f.srv = rest.NewClient(fs.Config.Client())
 	f.srv.SetRoot(apiURL)
+	f.srv.SetHeader("User-Agent", fs.Config.UserAgent)
 
-	// Create pacer
-	f.pacer = fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant)))
+	// Create pacer with proper configuration
+	f.pacer = fs.NewPacer(ctx, pacer.NewDefault(
+		pacer.MinSleep(minSleep),
+		pacer.MaxSleep(maxSleep),
+		pacer.DecayConstant(decayConstant),
+	))
 
 	// Set up features
 	f.features = (&fs.Features{
