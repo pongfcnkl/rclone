@@ -50,7 +50,7 @@ func init() {
 		Description: "139 Cloud Storage",
 		NewFs:       NewFs,
 		Options: []fs.Option{{
-			Name:     "type",
+			Name:     "cloud_type",
 			Help:     "Type of 139 cloud storage (personal/family/group/personal_new)",
 			Required: true,
 			Examples: []fs.OptionExample{{
@@ -85,10 +85,10 @@ func init() {
 
 // Options defines the configuration for this backend
 type Options struct {
-	Type          string `config:"type"`
-	Authorization string `config:"authorization"`
-	RootFolderID  string `config:"root_folder_id"`
-	CloudID       string `config:"cloud_id"`
+	CloudType      string `config:"cloud_type"`
+	Authorization  string `config:"authorization"`
+	RootFolderID   string `config:"root_folder_id"`
+	CloudID        string `config:"cloud_id"`
 }
 
 // Fs represents a remote 139 cloud storage
@@ -263,7 +263,7 @@ func (f *Fs) request(ctx context.Context, opts *rest.Opts) ([]byte, error) {
 	
 	sign := calSign(string(body), ts, randStr)
 	svcType := "1"
-	if f.opt.Type == MetaFamily {
+	if f.opt.CloudType == MetaFamily {
 		svcType = "2"
 	}
 
@@ -497,7 +497,7 @@ func (f *Fs) initialize() error {
 	f.account = splits[1]
 
 	// Set root folder ID based on type
-	switch f.opt.Type {
+	switch f.opt.CloudType {
 	case MetaPersonalNew:
 		if f.opt.RootFolderID == "" {
 			f.opt.RootFolderID = "/"
@@ -513,7 +513,7 @@ func (f *Fs) initialize() error {
 	case MetaFamily:
 		// No default root folder ID for family cloud
 	default:
-		return fmt.Errorf("unsupported cloud type: %s", f.opt.Type)
+		return fmt.Errorf("unsupported cloud type: %s", f.opt.CloudType)
 	}
 
 	return nil
