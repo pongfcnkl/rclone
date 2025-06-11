@@ -463,10 +463,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		opt:  opt,
 	}
 
-	// Create REST client with proper configuration
-	f.srv = rest.NewClient(fs.Config.Client())
+	// Create REST client with default HTTP client
+	f.srv = rest.NewClient(nil)
 	f.srv.SetRoot(apiURL)
-	f.srv.SetHeader("User-Agent", fs.Config.UserAgent)
+	f.srv.SetHeader("User-Agent", "rclone/139cloud")
 
 	// Create pacer with proper configuration
 	f.pacer = fs.NewPacer(ctx, pacer.NewDefault(
