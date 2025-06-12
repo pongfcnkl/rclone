@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
+	"net/http"
 	"path"
 	"sort"
 	"strconv"
@@ -244,16 +245,60 @@ type PersonalFileItem struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
-// encodeURIComponent encodes a string for use in URI
+// ParallelHashCtx 分片哈希上下文
+type ParallelHashCtx struct {
+	PartOffset int64 `json:"partOffset"`
+}
+
+// PartInfo 分片信息
+type PartInfo struct {
+	PartNumber      int64           `json:"partNumber"`
+	PartSize        int64           `json:"partSize"`
+	ParallelHashCtx ParallelHashCtx `json:"parallelHashCtx"`
+}
+
+// PersonalPartInfo 个人云分片信息
+type PersonalPartInfo struct {
+	PartNumber int    `json:"partNumber"`
+	UploadUrl  string `json:"uploadUrl"`
+}
+
+// PersonalUploadResp 个人云上传响应
+type PersonalUploadResp struct {
+	BaseResp
+	Data struct {
+		FileId      string             `json:"fileId"`
+		FileName    string             `json:"fileName"`
+		PartInfos   []PersonalPartInfo `json:"partInfos"`
+		Exist       bool               `json:"exist"`
+		RapidUpload bool               `json:"rapidUpload"`
+		UploadId    string             `json:"uploadId"`
+	} `json:"data"`
+}
+
+// PersonalUploadUrlResp 个人云获取上传地址响应
+type PersonalUploadUrlResp struct {
+	BaseResp
+	Data struct {
+		FileId    string             `json:"fileId"`
+		UploadId  string             `json:"uploadId"`
+		PartInfos []PersonalPartInfo `json:"partInfos"`
+	} `json:"data"`
+}
+
+// encodeURIComponent 对字符串进行 URL 编码
 func encodeURIComponent(str string) string {
-	r := url.QueryEscape(str)
-	r = strings.Replace(r, "+", "%20", -1)
-	r = strings.Replace(r, "%21", "!", -1)
-	r = strings.Replace(r, "%27", "'", -1)
-	r = strings.Replace(r, "%28", "(", -1)
-	r = strings.Replace(r, "%29", ")", -1)
-	r = strings.Replace(r, "%2A", "*", -1)
-	return r
+	var result strings.Builder
+	for i := 0; i < len(str); i++ {
+		c := str[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' || c == '\'' || c == '(' || c == ')' {
+			result.WriteByte(c)
+		} else {
+			fmt.Fprintf(&result, "%%%02X", c)
+		}
+	}
+	return result.String()
 }
 
 // getMD5EncodeStr returns MD5 hash of string
@@ -422,12 +467,12 @@ func (f *Fs) request(ctx context.Context, opts *rest.Opts) ([]byte, error) {
 			newOpts.Body = bytes.NewReader(bodyBytes)
 		} else {
 			// 如果是其他类型，尝试 JSON 序列化
-			var err error
-			bodyBytes, err = json.Marshal(opts.Body)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal request body: %v", err)
-			}
-			newOpts.Body = bytes.NewReader(bodyBytes)
+		var err error
+		bodyBytes, err = json.Marshal(opts.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %v", err)
+		}
+		newOpts.Body = bytes.NewReader(bodyBytes)
 		}
 	}
 
@@ -572,150 +617,62 @@ func shouldRetry(err error) (bool, error) {
 
 // List implements fs.Fs
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	// 打印调试信息
-	fmt.Printf("Debug - List called with dir: %q\n", dir)
-	fmt.Printf("Debug - Current root_folder_id: %q\n", f.opt.RootFolderID)
-	fmt.Printf("Debug - Cloud type: %s\n", f.opt.CloudType)
-	fmt.Printf("Debug - Current root: %q\n", f.root)
-
 	// 获取目录 ID
-	var dirID string
-	if dir == "" {
-		// 如果是根目录，需要逐级查找目标目录
-		parts := strings.Split(strings.Trim(f.root, "/"), "/")
-		fmt.Printf("Debug - Looking for path parts: %v\n", parts)
-
-		// 从根目录开始
-		currentID := "/"
-		currentPath := ""
-
-		// 逐级查找目录
-		for i, part := range parts {
-			currentPath = path.Join(currentPath, part)
-			fmt.Printf("Debug - Looking for part %d: %q in path %q\n", i, part, currentPath)
-
-			// 检查缓存
-			if cachedID, ok := f.dirCache[currentPath]; ok {
-				fmt.Printf("Debug - Found cached ID for %q: %q\n", currentPath, cachedID)
-				currentID = cachedID
-				continue
-			}
-
-			// 获取当前目录的内容
-			items, err := f.listDir(ctx, currentID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to list directory %q: %v", currentPath, err)
-			}
-
-			// 在当前目录中查找目标目录
-			found := false
-			for _, item := range items {
-				fmt.Printf("Debug - Checking item: %q (ID: %q) in %q\n", item.Name, item.ID, currentPath)
-				if item.Name == part {
-					if item.IsDirectory {
-						currentID = item.ID
-						// 缓存目录 ID
-						f.dirCache[currentPath] = currentID
-						fmt.Printf("Debug - Found directory ID for %q: %q\n", currentPath, currentID)
-						found = true
-						break
-					} else {
-						fmt.Printf("Debug - Found %q but it's not a directory\n", part)
-						return nil, fs.ErrorIsFile
-					}
-				}
-			}
-
-			if !found {
-				fmt.Printf("Debug - Directory not found: %q\n", currentPath)
-				return nil, fs.ErrorDirNotFound
-			}
-		}
-
-		dirID = currentID
-	} else {
-		// 如果不是根目录，需要从当前目录开始查找
-		parentDir := path.Dir(dir)
-		dirName := path.Base(dir)
-		
-		// 获取父目录的 ID
-		var parentID string
-		if parentDir == "." {
-			// 如果父目录是当前目录，使用当前目录的 ID
-			parentID = dirID
-		} else {
-			// 否则递归获取父目录的 ID
-			parentEntries, err := f.List(ctx, parentDir)
-			if err != nil {
-				return nil, fmt.Errorf("failed to list parent directory: %v", err)
-			}
-			// 从父目录的条目中找到当前目录
-			for _, entry := range parentEntries {
-				if entry.Remote() == dir {
-					if d, ok := entry.(fs.Directory); ok {
-						parentID = d.ID()
-						break
-					}
-				}
-			}
-		}
-
-		// 在父目录中查找目标目录
-		parentItems, err := f.listDir(ctx, parentID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list parent directory: %v", err)
-		}
-
-		found := false
-		for _, item := range parentItems {
-			fmt.Printf("Debug - Checking parent item: %q (ID: %q)\n", item.Name, item.ID)
-			if item.Name == dirName {
-				if item.IsDirectory {
-					dirID = item.ID
-					f.dirCache[dir] = dirID
-					fmt.Printf("Debug - Found directory ID for %q: %q\n", dir, dirID)
-					found = true
-					break
-				} else {
-					fmt.Printf("Debug - Found %q but it's not a directory\n", dir)
-					return nil, fs.ErrorIsFile
-				}
-			}
-		}
-		if !found {
-			fmt.Printf("Debug - Directory not found: %q\n", dir)
-			return nil, fs.ErrorDirNotFound
-		}
+	dirID, err := f.getDirID(ctx, dir, "")
+	if err != nil {
+		return nil, err
 	}
 
-	// List directory contents
-	fmt.Printf("Debug - Listing directory with ID: %q\n", dirID)
+	// 列出目录内容
 	items, err := f.listDir(ctx, dirID)
 	if err != nil {
-		return nil, fmt.Errorf("list directory failed: %v (dir: %q, dirID: %q)", err, dir, dirID)
+		return nil, err
 	}
 
-	// Convert to fs.DirEntries
+	// 转换为 DirEntries
 	entries = make(fs.DirEntries, 0, len(items))
 	for _, item := range items {
+		// 构建远程路径
 		remote := path.Join(dir, item.Name)
-		fmt.Printf("Debug - Processing item: %q (ID: %q, IsDir: %v)\n", item.Name, item.ID, item.IsDirectory)
 		
-		if item.IsDirectory {
-			// 缓存目录 ID
-			f.dirCache[remote] = item.ID
-			fmt.Printf("Debug - Caching directory ID for %q: %q\n", remote, item.ID)
-			entries = append(entries, fs.NewDir(remote, time.Now()))
-		} else {
-			modTime, _ := time.Parse(time.RFC3339, item.UpdatedAt)
+		// 检查是否是目录
+		isDir := item.Type == "folder" || item.IsDirectory
+		
+		// 如果是目录，确保路径以 / 结尾
+		if isDir {
+			if !strings.HasSuffix(remote, "/") {
+				remote += "/"
+			}
+		}
+
+		// 创建目录或文件对象
+		if isDir {
 			entries = append(entries, &Object{
-				fs:       f,
-				remote:   remote,
-				id:       item.ID,
-				modTime:  modTime,
-				size:     item.Size,
-				hash:     item.Hash,
-				mimeType: item.MimeType,
+				fs:          f,
+				remote:      remote,
+				id:          item.ID,
+				modTime:     time.Now(),
+				size:        0,
+				isDirectory: true,
+			})
+		} else {
+			// 解析时间
+			var modTime time.Time
+			if item.UpdatedAt != "" {
+				modTime, _ = time.Parse("2006-01-02 15:04:05", item.UpdatedAt)
+			} else {
+				modTime = time.Now()
+			}
+
+			entries = append(entries, &Object{
+				fs:          f,
+				remote:      remote,
+				id:          item.ID,
+				modTime:     modTime,
+				size:        item.Size,
+				hash:        item.Hash,
+				mimeType:    item.MimeType,
+				isDirectory: false,
 			})
 		}
 	}
@@ -723,154 +680,194 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	return entries, nil
 }
 
-// getRootFolderID 获取新版个人云的根目录ID
+// getRootFolderID 获取根目录 ID
 func (f *Fs) getRootFolderID(ctx context.Context) (string, error) {
-	fmt.Printf("Debug - getRootFolderID called\n")
+	if f.opt.RootFolderID != "" {
+		return f.opt.RootFolderID, nil
+	}
 
-	// 设置基础 URL
-	f.srv.SetRoot("https://personal-kd-njs.yun.139.com")
-	pathname := "/hcy/file/list"
-
-	// 处理路径，保留 "/" 前缀
-	var rootID string
-	if f.root == "" {
-		rootID = "/"  // 根目录必须使用 "/"
+	if f.opt.CloudType == "personal_new" {
+		f.opt.RootFolderID = "/"
+	} else if f.opt.CloudType == "personal" {
+		f.opt.RootFolderID = "root"
+	} else if f.opt.CloudType == "group" {
+		if f.opt.CloudID == "" {
+			return "", fmt.Errorf("cloud_id is required for group cloud type")
+		}
+		f.opt.RootFolderID = f.opt.CloudID
+	} else if f.opt.CloudType == "family" {
+		// 家庭云不需要特殊处理
 	} else {
-		rootID = f.root  // 保持原始路径，包括 "/" 前缀
+		return "", fmt.Errorf("unsupported cloud type: %s", f.opt.CloudType)
 	}
 
-	fmt.Printf("Debug - Using root ID: %q for path: %q\n", rootID, f.root)
-
-	// 构建请求体
-	body := map[string]interface{}{
-		"parentFileId": rootID,  // 使用处理后的路径
-		"imageThumbnailStyleList": []string{"Small", "Large"},
-		"orderBy":                 "updated_at",
-		"orderDirection":          "DESC",
-		"pageInfo": map[string]interface{}{
-			"pageCursor": "",
-			"pageSize":   100,
-		},
-	}
-
-	// 打印请求详情
-	fmt.Printf("Debug - Request details:\n")
-	fmt.Printf("  URL: %s%s\n", "https://personal-kd-njs.yun.139.com", pathname)
-	fmt.Printf("  Method: POST\n")
-	fmt.Printf("  Parent File ID: %q\n", rootID)
-	fmt.Printf("  Request body: %+v\n", body)
-
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request body: %v", err)
-	}
-
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   pathname,
-		Body:   bytes.NewReader(bodyBytes),
-	}
-
-	var resp PersonalListResp
-	result, err := f.request(ctx, &opts)
-	if err != nil {
-		return "", err
-	}
-
-	if err := json.Unmarshal(result, &resp); err != nil {
-		return "", fmt.Errorf("parse response failed: %v (response: %s)", err, string(result))
-	}
-
-	if !resp.Success {
-		return "", fmt.Errorf("%s", resp.Message)
-	}
-
-	// 返回根目录的ID
-	return rootID, nil
+	return f.opt.RootFolderID, nil
 }
 
-// getDirID 根据路径获取目录ID
-func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
-	fmt.Printf("Debug - getDirID called with dir: %q\n", dir)
-
-	// 如果是根目录，获取根目录ID
-	if dir == "" {
-		rootID, err := f.getRootFolderID(ctx)
-		if err != nil {
-			return "", fmt.Errorf("failed to get root folder ID: %v", err)
+// getDirID 获取目录 ID
+func (f *Fs) getDirID(ctx context.Context, dir string, destPath string) (string, error) {
+	// 如果提供了目标路径，优先使用目标路径
+	if destPath != "" {
+		// 分割目标路径
+		parts := strings.Split(destPath, "/")
+		cleanParts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if part != "" && part != "." {
+				cleanParts = append(cleanParts, part)
+			}
 		}
-		return rootID, nil
+
+		// 如果清理后没有路径部分，返回根目录 ID
+		if len(cleanParts) == 0 {
+			return f.opt.RootFolderID, nil
+		}
+
+		// 从根目录开始遍历
+		currentID := f.opt.RootFolderID
+		currentPath := ""
+
+		// 遍历每一级目录
+		for i, part := range cleanParts {
+			currentPath = path.Join(currentPath, part)
+
+			// 检查缓存
+			if id, ok := f.dirCache[currentPath]; ok {
+				currentID = id
+				continue
+			}
+
+			// 获取当前目录下的文件列表
+			data := map[string]interface{}{
+				"parentFileId": currentID,
+				"pageInfo": map[string]interface{}{
+					"pageSize":    100,
+					"pageCursor":  "",
+				},
+				"orderBy":        "updated_at",
+				"orderDirection": "DESC",
+			}
+
+			opts := rest.Opts{
+				Method: "POST",
+				Path:   "/hcy/file/list",
+				Body:   bytes.NewReader(mustJSON(data)),
+			}
+
+			var resp PersonalListResp
+			result, err := f.request(ctx, &opts)
+			if err != nil {
+				return "", fmt.Errorf("failed to list directory %q: %v", currentPath, err)
+			}
+
+			err = json.Unmarshal(result, &resp)
+			if err != nil {
+				return "", fmt.Errorf("failed to parse directory list response: %v", err)
+			}
+
+			if !resp.Success {
+				return "", fmt.Errorf("failed to list directory %q: %s", currentPath, resp.Message)
+			}
+
+			// 查找目标目录
+			found := false
+			for _, item := range resp.Data.Items {
+				if item.Type == "folder" && item.Name == part {
+					currentID = item.FileId
+					f.dirCache[currentPath] = currentID
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				return "", fmt.Errorf("directory not found: %q", currentPath)
+			}
+
+			// 如果是最后一个部分，确保更新缓存
+			if i == len(cleanParts)-1 {
+				f.dirCache[destPath] = currentID
+			}
+		}
+
+		return currentID, nil
 	}
 
-	// 检查缓存中是否有该目录的ID
-	if cachedID, ok := f.dirCache[dir]; ok {
-		fmt.Printf("Debug - Using cached directory ID for %q: %q\n", dir, cachedID)
-		return cachedID, nil
+	// 如果没有提供目标路径，使用原来的逻辑
+	if dir == "" || dir == "." {
+		return f.opt.RootFolderID, nil
+	}
+
+	// 如果目录已经在缓存中，直接返回
+	if id, ok := f.dirCache[dir]; ok {
+		return id, nil
 	}
 
 	// 分割路径
-	parts := strings.Split(strings.Trim(dir, "/"), "/")
-	currentPath := ""
-	
-	// 获取根目录ID作为起始点
-	parentID, err := f.getRootFolderID(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to get root folder ID: %v", err)
+	parts := strings.Split(dir, "/")
+	cleanParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" && part != "." {
+			cleanParts = append(cleanParts, part)
+		}
 	}
 
-	// 逐级查找目录ID
-	for _, part := range parts {
-		currentPath = path.Join(currentPath, part)
-		fmt.Printf("Debug - Looking up directory ID for path: %q (parent ID: %q)\n", currentPath, parentID)
+	// 如果清理后没有路径部分，返回根目录 ID
+	if len(cleanParts) == 0 {
+		return f.opt.RootFolderID, nil
+	}
 
-		// 设置请求参数
-		f.srv.SetRoot("https://personal-kd-njs.yun.139.com")
-		pathname := "/hcy/file/list"
-		body := map[string]interface{}{
-			"parentFileId": parentID,
-			"imageThumbnailStyleList": []string{"Small", "Large"},
-			"orderBy":                 "updated_at",
-			"orderDirection":          "DESC",
-			"pageInfo": map[string]interface{}{
-				"pageCursor": "",
-				"pageSize":   100,
-			},
+	// 从根目录开始遍历
+	currentID := f.opt.RootFolderID
+	currentPath := ""
+
+	// 遍历每一级目录
+	for i, part := range cleanParts {
+		currentPath = path.Join(currentPath, part)
+
+		// 检查缓存
+		if id, ok := f.dirCache[currentPath]; ok {
+			currentID = id
+			continue
 		}
 
-		bodyBytes, err := json.Marshal(body)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal request body: %v", err)
+		// 获取当前目录下的文件列表
+		data := map[string]interface{}{
+			"parentFileId": currentID,
+			"pageInfo": map[string]interface{}{
+				"pageSize":    100,
+				"pageCursor":  "",
+			},
+			"orderBy":        "updated_at",
+			"orderDirection": "DESC",
 		}
 
 		opts := rest.Opts{
 			Method: "POST",
-			Path:   pathname,
-			Body:   bytes.NewReader(bodyBytes),
+			Path:   "/hcy/file/list",
+			Body:   bytes.NewReader(mustJSON(data)),
 		}
 
 		var resp PersonalListResp
 		result, err := f.request(ctx, &opts)
 		if err != nil {
-			return "", fmt.Errorf("request failed: %v", err)
+			return "", fmt.Errorf("failed to list directory %q: %v", currentPath, err)
 		}
 
 		err = json.Unmarshal(result, &resp)
 		if err != nil {
-			return "", fmt.Errorf("parse response failed: %v", err)
+			return "", fmt.Errorf("failed to parse directory list response: %v", err)
 		}
 
 		if !resp.Success {
-			return "", fmt.Errorf("API error: %s", resp.Message)
+			return "", fmt.Errorf("failed to list directory %q: %s", currentPath, resp.Message)
 		}
 
-		// 在当前目录中查找目标目录
+		// 查找目标目录
 		found := false
 		for _, item := range resp.Data.Items {
-			if item.Name == part && item.Type == "folder" {
-				parentID = item.FileId
-				// 缓存目录ID
-				f.dirCache[currentPath] = parentID
-				fmt.Printf("Debug - Found directory ID for %q: %q\n", currentPath, parentID)
+			if item.Type == "folder" && item.Name == part {
+				currentID = item.FileId
+				f.dirCache[currentPath] = currentID
 				found = true
 				break
 			}
@@ -879,101 +876,90 @@ func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
 		if !found {
 			return "", fmt.Errorf("directory not found: %q", currentPath)
 		}
+
+		// 如果是最后一个部分，确保更新缓存
+		if i == len(cleanParts)-1 {
+			f.dirCache[dir] = currentID
+		}
 	}
 
-	return parentID, nil
+	return currentID, nil
 }
 
 // listDir lists the directory contents
 func (f *Fs) listDir(ctx context.Context, dirID string) ([]FileItem, error) {
-	fmt.Printf("Debug - listDir called with dirID: %q\n", dirID)
+	if dirID == "" {
+		dirID = "/"
+	}
 
-	// 设置基础 URL
-	f.srv.SetRoot("https://personal-kd-njs.yun.139.com")
-	pathname := "/hcy/file/list"
-	body := map[string]interface{}{
-		"parentFileId": dirID,  // 使用目录的 fileId
-		"imageThumbnailStyleList": []string{"Small", "Large"},
-		"orderBy":                 "updated_at",
-		"orderDirection":          "DESC",
+	data := map[string]interface{}{
+		"parentFileId": dirID,
 		"pageInfo": map[string]interface{}{
-			"pageCursor": "",
-			"pageSize":   100,
+			"pageSize":    100,
+			"pageCursor":  "",
+		},
+		"orderBy":        "updated_at",
+		"orderDirection": "DESC",
+		"imageThumbnailStyleList": []string{
+			"Small",
+			"Large",
 		},
 	}
 
-	// 打印请求详情
-	fmt.Printf("Debug - MetaPersonalNew request details:\n")
-	fmt.Printf("  URL: %s%s\n", "https://personal-kd-njs.yun.139.com", pathname)
-	fmt.Printf("  Method: POST\n")
-	fmt.Printf("  Parent File ID: %q\n", dirID)
-	fmt.Printf("  Page cursor: %s\n", body["pageInfo"].(map[string]interface{})["pageCursor"])
-	fmt.Printf("  Request body: %+v\n", body)
-
-	// 将请求体转换为 JSON
-	bodyBytes, err := json.Marshal(body)
+	bodyBytes, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %v", err)
 	}
-	fmt.Printf("  Request body JSON:\n%s\n", string(bodyBytes))
 
-	// 发送请求
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   pathname,
-		Body:   bytes.NewReader(bodyBytes),  // 使用 bytes.NewReader 包装 []byte
+		opts := rest.Opts{
+			Method: "POST",
+		Path:   "/hcy/file/list",
+			Body:   bytes.NewReader(bodyBytes),
 	}
 
-	var resp PersonalListResp  // 使用 PersonalListResp 而不是 ListResp
-	result, err := f.request(ctx, &opts)  // 移除多余的参数
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %v", err)
-	}
+	var resp ListResp
+	result, err := f.request(ctx, &opts)
+			if err != nil {
+				return nil, err
+			}
 
-	// 解析响应
-	err = json.Unmarshal(result, &resp)
-	if err != nil {
-		return nil, fmt.Errorf("parse response failed: %v", err)
-	}
+			err = json.Unmarshal(result, &resp)
+			if err != nil {
+		return nil, fmt.Errorf("failed to parse response: %v", err)
+			}
 
-	if !resp.Success {
+			if !resp.Success {
 		return nil, fmt.Errorf("API error: %s", resp.Message)
 	}
 
-	// 打印响应内容
-	fmt.Printf("Debug - Response body: %s\n", string(result))
-
-	// 处理响应
-	items := make([]FileItem, 0, len(resp.Data.Items))
-	seenItems := make(map[string]bool) // 用于去重
-
-	for _, item := range resp.Data.Items {
-		// 创建唯一键，使用文件名和类型组合
-		key := item.Name + ":" + item.Type
-		if seenItems[key] {
-			fmt.Printf("Debug - Skipping duplicate item: %s (%s)\n", item.Name, item.Type)
-			continue
+	// 处理分页
+	allItems := resp.Data.Items
+	for resp.Data.NextPageCursor != "" {
+		data["pageInfo"].(map[string]interface{})["pageCursor"] = resp.Data.NextPageCursor
+		bodyBytes, err = json.Marshal(data)
+			if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %v", err)
 		}
-		seenItems[key] = true
+		opts.Body = bytes.NewReader(bodyBytes)
 
-		// 转换 PersonalFileItem 到 FileItem
-		fileItem := FileItem{
-			ID:          item.FileId,  // 使用 PersonalFileItem 的字段
-			Name:        item.Name,
-			Size:        item.Size,
-			Type:        item.Type,
-			CreatedAt:   item.CreatedAt,
-			UpdatedAt:   item.UpdatedAt,
-			IsDirectory: item.Type == "folder",
-			Hash:        "",  // PersonalFileItem 没有 ContentHash 字段
-			MimeType:    "",  // PersonalFileItem 没有 FileExtension 字段
+			result, err = f.request(ctx, &opts)
+			if err != nil {
+			return nil, err
+			}
+
+			err = json.Unmarshal(result, &resp)
+			if err != nil {
+			return nil, fmt.Errorf("failed to parse response: %v", err)
+			}
+
+			if !resp.Success {
+				return nil, fmt.Errorf("API error: %s", resp.Message)
 		}
 
-		fmt.Printf("Debug - Added item: %s (%s)\n", fileItem.Name, fileItem.Type)
-		items = append(items, fileItem)
+		allItems = append(allItems, resp.Data.Items...)
 	}
 
-	return items, nil
+	return allItems, nil
 }
 
 // NewObject implements fs.Fs
@@ -1005,9 +991,6 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 // NewFs constructs an Fs from the path, container: and optional path
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
-	// 打印调试信息
-	fmt.Printf("Debug - NewFs called with name: %q, root: %q\n", name, root)
-
 	// 解析配置
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
@@ -1202,246 +1185,488 @@ func (f *Fs) Features() *fs.Features {
 	return f.features
 }
 
-// Put in to the remote path with the modTime given of the given size
+// Put implements fs.Fs
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	// TODO: Implement upload
-	return nil, nil
+	// 获取目标路径
+	destPath := f.root
+	if destPath == "" {
+		destPath = src.Remote()
+	}
+
+	// 获取父目录路径
+	parentDir := path.Dir(destPath)
+	if parentDir == "." {
+		parentDir = ""
+	}
+
+	// 获取父目录 ID
+	parentFileId, err := f.getDirID(ctx, parentDir, destPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parent directory ID: %v", err)
+	}
+
+	// 获取文件名
+	fileName := path.Base(src.Remote())
+
+	// 计算文件哈希
+	var fullHash string
+	if hash, err := src.Hash(ctx, hash.SHA256); err == nil && hash != "" {
+		fullHash = hash
+	} else {
+		// 如果没有哈希,需要计算
+		hash := sha256.New()
+		_, err := io.Copy(hash, in)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate file hash: %v", err)
+		}
+		fullHash = hex.EncodeToString(hash.Sum(nil))
+		// 重置 reader
+		if seeker, ok := in.(io.Seeker); ok {
+			_, err = seeker.Seek(0, io.SeekStart)
+			if err != nil {
+				return nil, fmt.Errorf("failed to reset reader: %v", err)
+			}
+		} else {
+			return nil, fmt.Errorf("reader does not support seeking")
+		}
+	}
+
+	// 计算分片信息
+	partSize := f.getPartSize(src.Size())
+	part := (src.Size() + partSize - 1) / partSize
+	if part == 0 {
+		part = 1
+	}
+
+	partInfos := make([]PartInfo, 0, part)
+	for i := int64(0); i < part; i++ {
+		start := i * partSize
+		byteSize := src.Size() - start
+		if byteSize > partSize {
+			byteSize = partSize
+		}
+		partNumber := i + 1
+		partInfo := PartInfo{
+			PartNumber: partNumber,
+			PartSize:   byteSize,
+			ParallelHashCtx: ParallelHashCtx{
+				PartOffset: start,
+			},
+		}
+		partInfos = append(partInfos, partInfo)
+	}
+
+	// 筛选出前 100 个 partInfos
+	firstPartInfos := partInfos
+	if len(firstPartInfos) > 100 {
+		firstPartInfos = firstPartInfos[:100]
+	}
+
+	// 创建上传任务
+	data := map[string]interface{}{
+		"contentHash":          fullHash,
+		"contentHashAlgorithm": "SHA256",
+		"contentType":          "application/octet-stream",
+		"parallelUpload":       false,
+		"partInfos":            firstPartInfos,
+		"size":                 src.Size(),
+		"parentFileId":         parentFileId,
+		"name":                 fileName,
+		"type":                 "file",
+		"fileRenameMode":       "auto_rename",
+	}
+
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/hcy/file/create",
+		Body:   bytes.NewReader(mustJSON(data)),
+	}
+
+	var resp PersonalUploadResp
+	result, err := f.request(ctx, &opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create upload task: %v", err)
+	}
+
+	err = json.Unmarshal(result, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse upload response: %v", err)
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("failed to create upload task: %s", resp.Message)
+	}
+
+	// 如果文件已存在且支持秒传
+	if resp.Data.Exist {
+		return &Object{
+			fs:          f,
+			remote:      src.Remote(),
+			id:          resp.Data.FileId,
+			modTime:     src.ModTime(ctx),
+			size:        src.Size(),
+			isDirectory: false,
+		}, nil
+	}
+
+	// 获取上传地址
+	uploadPartInfos := resp.Data.PartInfos
+
+	// 获取后续分片的上传地址
+	for i := 101; i < len(partInfos); i += 100 {
+		end := i + 100
+		if end > len(partInfos) {
+			end = len(partInfos)
+		}
+		batchPartInfos := partInfos[i:end]
+
+		uploadData := map[string]interface{}{
+			"fileId":   resp.Data.FileId,
+			"uploadId": resp.Data.UploadId,
+			"partInfos": batchPartInfos,
+		}
+
+		opts = rest.Opts{
+			Method: "POST",
+			Path:   "/hcy/file/getUploadUrl",
+			Body:   bytes.NewReader(mustJSON(uploadData)),
+		}
+
+		var uploadUrlResp PersonalUploadUrlResp
+		result, err = f.request(ctx, &opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get upload URL: %v", err)
+		}
+
+		err = json.Unmarshal(result, &uploadUrlResp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse upload URL response: %v", err)
+		}
+
+		if !uploadUrlResp.Success {
+			return nil, fmt.Errorf("failed to get upload URL: %s", uploadUrlResp.Message)
+		}
+
+		uploadPartInfos = append(uploadPartInfos, uploadUrlResp.Data.PartInfos...)
+	}
+
+	// 只有在成功获取到分片上传地址并且上传了分片后，才会调用完成上传的接口
+	if len(uploadPartInfos) > 0 {
+		// 分片上传
+		for i, uploadPartInfo := range uploadPartInfos {
+			index := uploadPartInfo.PartNumber - 1
+			partSize := partInfos[index].PartSize
+
+			// 读取分片数据
+			partData := make([]byte, partSize)
+			n, err := io.ReadFull(in, partData)
+			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+				return nil, fmt.Errorf("failed to read part %d: %v", i+1, err)
+			}
+			partData = partData[:n]
+
+			// 创建 HTTP 请求
+			req, err := http.NewRequestWithContext(ctx, "PUT", uploadPartInfo.UploadUrl, bytes.NewReader(partData))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create request for part %d: %v", i+1, err)
+			}
+
+			// 设置请求头
+			req.Header.Set("Content-Type", "application/octet-stream")
+			req.Header.Set("Content-Length", fmt.Sprint(partSize))
+			req.Header.Set("Origin", "https://yun.139.com")
+			req.Header.Set("Referer", "https://yun.139.com/")
+
+			// 发送请求
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to upload part %d: %v", i+1, err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("failed to upload part %d: unexpected status code %d", i+1, resp.StatusCode)
+			}
+		}
+
+		// 完成上传
+		completeData := map[string]interface{}{
+			"contentHash":          fullHash,
+			"contentHashAlgorithm": "SHA256",
+			"fileId":               resp.Data.FileId,
+			"uploadId":             resp.Data.UploadId,
+		}
+
+		opts = rest.Opts{
+			Method: "POST",
+			Path:   "/hcy/file/complete",
+			Body:   bytes.NewReader(mustJSON(completeData)),
+		}
+
+		var completeResp BaseResp
+		result, err = f.request(ctx, &opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to complete upload: %v", err)
+		}
+
+		err = json.Unmarshal(result, &completeResp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse complete response: %v", err)
+		}
+
+		if !completeResp.Success {
+			return nil, fmt.Errorf("failed to complete upload: %s", completeResp.Message)
+		}
+	}
+
+	// 处理文件名冲突
+	if resp.Data.FileName != fileName {
+		// 给服务器一定时间处理数据
+		time.Sleep(time.Millisecond * 500)
+
+		// 获取文件列表
+		entries, err := f.List(ctx, parentDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list directory after upload: %v", err)
+		}
+
+		// 删除旧文件
+		for _, entry := range entries {
+			if entry.Remote() == src.Remote() {
+				if obj, ok := entry.(*Object); ok {
+					// 删除前重命名旧文件
+					renameData := map[string]interface{}{
+						"fileId":      obj.id,
+						"name":        obj.remote + random.String(4),
+						"description": "",
+					}
+					opts = rest.Opts{
+						Method: "POST",
+						Path:   "/hcy/file/update",
+						Body:   bytes.NewReader(mustJSON(renameData)),
+					}
+					_, err = f.request(ctx, &opts)
+					if err != nil {
+						return nil, fmt.Errorf("failed to rename old file: %v", err)
+					}
+
+					// 删除旧文件
+					deleteData := map[string]interface{}{
+						"fileIds": []string{obj.id},
+					}
+					opts = rest.Opts{
+						Method: "POST",
+						Path:   "/hcy/file/batchDelete",
+						Body:   bytes.NewReader(mustJSON(deleteData)),
+					}
+					_, err = f.request(ctx, &opts)
+					if err != nil {
+						return nil, fmt.Errorf("failed to delete old file: %v", err)
+					}
+				}
+				break
+			}
+		}
+
+		// 重命名新文件
+		for _, entry := range entries {
+			if entry.Remote() == path.Join(parentDir, resp.Data.FileName) {
+				if obj, ok := entry.(*Object); ok {
+					renameData := map[string]interface{}{
+						"fileId":      obj.id,
+						"name":        fileName,
+						"description": "",
+					}
+					opts = rest.Opts{
+						Method: "POST",
+						Path:   "/hcy/file/update",
+						Body:   bytes.NewReader(mustJSON(renameData)),
+					}
+					_, err = f.request(ctx, &opts)
+					if err != nil {
+						return nil, fmt.Errorf("failed to rename new file: %v", err)
+					}
+				}
+				break
+			}
+		}
+	}
+
+	// 创建对象并返回
+	return &Object{
+		fs:          f,
+		remote:      src.Remote(),
+		id:          resp.Data.FileId,
+		modTime:     src.ModTime(ctx),
+		size:        src.Size(),
+		isDirectory: false,
+	}, nil
 }
 
-// Mkdir implements fs.Fs
-func (f *Fs) Mkdir(ctx context.Context, dir string) error {
-	fmt.Printf("Debug - Mkdir called with dir: %q\n", dir)
-	fmt.Printf("Debug - Current root_folder_id: %q\n", f.opt.RootFolderID)
-	fmt.Printf("Debug - Cloud type: %s\n", f.opt.CloudType)
-	fmt.Printf("Debug - Current root: %q\n", f.root)
+// getPartSize 计算分片大小
+func (f *Fs) getPartSize(size int64) int64 {
+	// 默认分片大小为 100MB
+	partSize := int64(100 * 1024 * 1024)
+	// 如果文件大于 30GB，使用 512MB 的分片大小
+	if size > 30*1024*1024*1024 {
+		partSize = int64(512 * 1024 * 1024)
+	}
+	return partSize
+}
 
-	// 如果 dir 为空，说明要创建的目录就是 root
+// mustJSON 将数据转换为 JSON 字节
+func mustJSON(v interface{}) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// Mkdir creates a directory
+func (f *Fs) Mkdir(ctx context.Context, dir string) error {
+	// 如果 dir 为空，使用 f.root
 	if dir == "" {
 		dir = f.root
 	}
 
-	// 分割路径为各个部分
-	parts := strings.Split(strings.Trim(dir, "/"), "/")
-	fmt.Printf("Debug - Path parts: %v\n", parts)
+	// 分割路径
+	parts := strings.Split(dir, "/")
 
-	// 从根目录开始逐级创建
-	currentID := "/"
-	currentPath := ""
+	// 当前目录 ID，初始为根目录 ID
+	currentDirID := f.opt.RootFolderID
+	if currentDirID == "" {
+		currentDirID = "/"
+	}
 
-	for i, part := range parts {
+	// 逐级创建目录
+	for _, part := range parts {
 		if part == "" {
 			continue
 		}
 
-		currentPath = path.Join(currentPath, part)
-		fmt.Printf("Debug - Creating directory part %d: %q in path %q\n", i, part, currentPath)
-
 		// 检查目录是否已存在
-		entries, err := f.List(ctx, currentPath)
-		if err == nil {
-			// 目录已存在，获取其 ID
-			for _, entry := range entries {
-				if entry.Remote() == currentPath {
-					if d, ok := entry.(fs.Directory); ok {
-						currentID = d.ID()
-						f.dirCache[currentPath] = currentID
-						fmt.Printf("Debug - Directory %q already exists with ID: %q\n", currentPath, currentID)
-						break
-					}
-				}
-			}
-			continue
+		items, err := f.listDir(ctx, currentDirID)
+		if err != nil {
+			return fmt.Errorf("failed to list directory: %v", err)
 		}
 
-		// 目录不存在，需要创建
-		fmt.Printf("Debug - Creating new directory: %q under parent ID: %q\n", part, currentID)
-
-		// 根据云类型选择不同的创建目录 API
-		switch f.opt.CloudType {
-		case MetaPersonalNew:
-			// 新个人云 API
-			data := map[string]interface{}{
-				"parentFileId":   currentID,
-				"name":           part,
-				"description":    "",
-				"type":           "folder",
-				"fileRenameMode": "force_rename",
+		// 查找目录
+		var foundDirID string
+		for _, item := range items {
+			if item.Name == part && item.IsDirectory {
+				foundDirID = item.ID
+				break
 			}
-			fmt.Printf("Debug - Creating directory with data: %+v\n", data)
-			
-			// 将 data 转换为 JSON
-			bodyBytes, err := json.Marshal(data)
-			if err != nil {
-				return fmt.Errorf("failed to marshal request body: %v", err)
-			}
-			
-			opts := &rest.Opts{
-				Method:     "POST",
-				Path:       "/hcy/file/create",
-				Body:       bytes.NewReader(bodyBytes),
-				NoResponse: true,
-			}
-			_, err = f.request(ctx, opts)
-			if err != nil {
-				return fmt.Errorf("failed to create directory %q: %v", currentPath, err)
-			}
-
-			// 获取新创建的目录的 ID
-			entries, err := f.List(ctx, currentPath)
-			if err != nil {
-				return fmt.Errorf("failed to list directory after creation: %v", err)
-			}
-			for _, entry := range entries {
-				if entry.Remote() == currentPath {
-					if d, ok := entry.(fs.Directory); ok {
-						currentID = d.ID()
-						f.dirCache[currentPath] = currentID
-						fmt.Printf("Debug - Created directory %q with ID: %q\n", currentPath, currentID)
-						break
-					}
-				}
-			}
-
-		case MetaPersonal:
-			// 旧个人云 API
-			data := map[string]interface{}{
-				"createCatalogExtReq": map[string]interface{}{
-					"parentCatalogID": currentID,
-					"newCatalogName":  part,
-					"commonAccountInfo": map[string]interface{}{
-						"account":     f.account,
-						"accountType": 1,
-					},
-				},
-			}
-			fmt.Printf("Debug - Creating directory with data: %+v\n", data)
-			
-			bodyBytes, err := json.Marshal(data)
-			if err != nil {
-				return fmt.Errorf("failed to marshal request body: %v", err)
-			}
-			
-			opts := &rest.Opts{
-				Method:     "POST",
-				Path:       "/orchestration/personalCloud/catalog/v1.0/createCatalogExt",
-				Body:       bytes.NewReader(bodyBytes),
-				NoResponse: true,
-			}
-			_, err = f.request(ctx, opts)
-			if err != nil {
-				return fmt.Errorf("failed to create directory %q: %v", currentPath, err)
-			}
-
-			// 获取新创建的目录的 ID
-			entries, err := f.List(ctx, currentPath)
-			if err != nil {
-				return fmt.Errorf("failed to list directory after creation: %v", err)
-			}
-			for _, entry := range entries {
-				if entry.Remote() == currentPath {
-					if d, ok := entry.(fs.Directory); ok {
-						currentID = d.ID()
-						f.dirCache[currentPath] = currentID
-						fmt.Printf("Debug - Created directory %q with ID: %q\n", currentPath, currentID)
-						break
-					}
-				}
-			}
-
-		case MetaFamily:
-			// 家庭云 API
-			data := map[string]interface{}{
-				"cloudID": f.opt.CloudID,
-				"commonAccountInfo": map[string]interface{}{
-					"account":     f.account,
-					"accountType": 1,
-				},
-				"docLibName": part,
-				"path":       path.Join(currentPath, currentID),
-			}
-			fmt.Printf("Debug - Creating directory with data: %+v\n", data)
-			
-			bodyBytes, err := json.Marshal(data)
-			if err != nil {
-				return fmt.Errorf("failed to marshal request body: %v", err)
-			}
-			
-			opts := &rest.Opts{
-				Method:     "POST",
-				Path:       "/orchestration/familyCloud-rebuild/cloudCatalog/v1.0/createCloudDoc",
-				Body:       bytes.NewReader(bodyBytes),
-				NoResponse: true,
-			}
-			_, err = f.request(ctx, opts)
-			if err != nil {
-				return fmt.Errorf("failed to create directory %q: %v", currentPath, err)
-			}
-
-			// 获取新创建的目录的 ID
-			entries, err := f.List(ctx, currentPath)
-			if err != nil {
-				return fmt.Errorf("failed to list directory after creation: %v", err)
-			}
-			for _, entry := range entries {
-				if entry.Remote() == currentPath {
-					if d, ok := entry.(fs.Directory); ok {
-						currentID = d.ID()
-						f.dirCache[currentPath] = currentID
-						fmt.Printf("Debug - Created directory %q with ID: %q\n", currentPath, currentID)
-						break
-					}
-				}
-			}
-
-		case MetaGroup:
-			// 群组云 API
-			data := map[string]interface{}{
-				"catalogName": part,
-				"commonAccountInfo": map[string]interface{}{
-					"account":     f.account,
-					"accountType": 1,
-				},
-				"groupID":      f.opt.CloudID,
-				"parentFileId": currentID,
-				"path":         path.Join(currentPath, currentID),
-			}
-			fmt.Printf("Debug - Creating directory with data: %+v\n", data)
-			
-			bodyBytes, err := json.Marshal(data)
-			if err != nil {
-				return fmt.Errorf("failed to marshal request body: %v", err)
-			}
-			
-			opts := &rest.Opts{
-				Method:     "POST",
-				Path:       "/orchestration/group-rebuild/catalog/v1.0/createGroupCatalog",
-				Body:       bytes.NewReader(bodyBytes),
-				NoResponse: true,
-			}
-			_, err = f.request(ctx, opts)
-			if err != nil {
-				return fmt.Errorf("failed to create directory %q: %v", currentPath, err)
-			}
-
-			// 获取新创建的目录的 ID
-			entries, err := f.List(ctx, currentPath)
-			if err != nil {
-				return fmt.Errorf("failed to list directory after creation: %v", err)
-			}
-			for _, entry := range entries {
-				if entry.Remote() == currentPath {
-					if d, ok := entry.(fs.Directory); ok {
-						currentID = d.ID()
-						f.dirCache[currentPath] = currentID
-						fmt.Printf("Debug - Created directory %q with ID: %q\n", currentPath, currentID)
-						break
-					}
-				}
-			}
-
-		default:
-			return fmt.Errorf("unsupported cloud type: %s", f.opt.CloudType)
 		}
+
+		// 如果目录不存在，创建它
+		if foundDirID == "" {
+			// 根据云类型选择不同的创建目录 API
+			var pathname string
+			var data map[string]interface{}
+
+			switch f.opt.CloudType {
+			case "personal_new":
+				pathname = "/hcy/file/create"
+				data = map[string]interface{}{
+					"name":            part,
+					"parentFileId":    currentDirID,
+					"type":            "folder",
+					"fileRenameMode":  "force_rename",
+					"description":     "",
+				}
+			case "personal":
+				pathname = "/orchestration/personalCloud/catalog/v1.0/createCatalogExt"
+				data = map[string]interface{}{
+					"catalogName":     part,
+					"parentCatalogID": currentDirID,
+				}
+			case "family":
+				pathname = "/orchestration/familyCloud-rebuild/cloudCatalog/v1.0/createCloudDoc"
+				data = map[string]interface{}{
+					"catalogName":     part,
+					"parentCatalogID": currentDirID,
+				}
+			case "group":
+				pathname = "/orchestration/group-rebuild/catalog/v1.0/createGroupCatalog"
+				data = map[string]interface{}{
+					"catalogName":     part,
+					"parentCatalogID": currentDirID,
+				}
+			default:
+				return fmt.Errorf("unsupported cloud type: %s", f.opt.CloudType)
+			}
+
+			// 设置基础 URL
+			f.srv.SetRoot("https://personal-kd-njs.yun.139.com")
+
+			// 将请求体转换为 JSON
+			bodyBytes, err := json.Marshal(data)
+			if err != nil {
+				return fmt.Errorf("failed to marshal request body: %v", err)
+			}
+
+			// 发送请求
+			opts := rest.Opts{
+				Method: "POST",
+				Path:   pathname,
+				Body:   bytes.NewReader(bodyBytes),
+			}
+
+			var resp BaseResp
+			result, err := f.request(ctx, &opts)
+			if err != nil {
+				return fmt.Errorf("failed to create directory %q: %v", part, err)
+			}
+
+			// 解析响应
+			err = json.Unmarshal(result, &resp)
+			if err != nil {
+				return fmt.Errorf("failed to parse response: %v (response: %s)", err, string(result))
+			}
+
+			if !resp.Success {
+				return fmt.Errorf("failed to create directory %q: %s", part, resp.Message)
+			}
+
+			// 获取新创建的目录 ID
+			var newDirID string
+			if f.opt.CloudType == "personal_new" {
+				var createResp struct {
+					BaseResp
+					Data struct {
+						FileId string `json:"fileId"`
+					} `json:"data"`
+				}
+				err = json.Unmarshal(result, &createResp)
+				if err != nil {
+					return fmt.Errorf("failed to parse create response: %v", err)
+				}
+				newDirID = createResp.Data.FileId
+			} else {
+				var createResp struct {
+					BaseResp
+					Data struct {
+						CatalogID string `json:"catalogID"`
+					} `json:"data"`
+				}
+				err = json.Unmarshal(result, &createResp)
+				if err != nil {
+					return fmt.Errorf("failed to parse create response: %v", err)
+				}
+				newDirID = createResp.Data.CatalogID
+			}
+
+			if newDirID == "" {
+				return fmt.Errorf("failed to get new directory ID for %q", part)
+			}
+
+			foundDirID = newDirID
+		}
+
+		// 更新当前目录 ID 为刚找到或创建的目录 ID
+		currentDirID = foundDirID
 	}
 
 	return nil
@@ -1546,3 +1771,41 @@ var (
 	_ fs.IDer      = (*Object)(nil)
 	_ fs.DirEntry  = (*Object)(nil)
 )
+
+// personalPost 发送 POST 请求到个人云 API
+func (f *Fs) personalPost(ctx context.Context, pathname string, data interface{}, resp interface{}) ([]byte, error) {
+	bodyBytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request body: %v", err)
+	}
+
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   pathname,
+		Body:   bytes.NewReader(bodyBytes),
+		ExtraHeaders: map[string]string{
+			"Content-Type": "application/json",
+			"Origin":      "https://yun.139.com",
+			"Referer":     "https://yun.139.com/",
+		},
+	}
+
+	result, err := f.request(ctx, &opts)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp != nil {
+		err = json.Unmarshal(result, resp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse response: %v", err)
+		}
+	}
+
+	return result, nil
+}
+
+// IsDir returns true if the object is a directory
+func (o *Object) IsDir() bool {
+	return o.isDirectory
+}
