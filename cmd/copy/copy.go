@@ -135,7 +135,7 @@ for more info.
 				// 如果目标文件存在且大小相同，则删除源文件
 				if deleteAfterCopy && obj.Size() == dstObj.Size() {
 					fs.Debugf(obj, "Deleting source file as it has same size as destination")
-					time.Sleep(3* time.Second)
+					time.Sleep(3 * time.Second)
 					return operations.DeleteFile(context.Background(), obj)
 				}
 				fs.Debugf(obj, "Skipping as unchanged")
