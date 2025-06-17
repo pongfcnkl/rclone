@@ -112,11 +112,11 @@ for more info.
 				// 定义回调函数，在文件复制完成后删除源文件
 				callback := func(obj fs.Object) error {
 					if deleteAfterCopy {
+						time.Sleep(3 * time.Second)  // 在检查目录内容之前等待
 						// 检查目标文件是否存在且大小相同
 						dstObj, err := fdst.NewObject(context.Background(), obj.Remote())
 						if err == nil && dstObj != nil && obj.Size() == dstObj.Size() {
 							fs.Debugf(obj, "Deleting source file as it has same size as destination")
-							time.Sleep(3 * time.Second)
 							return operations.DeleteFile(context.Background(), obj)
 						}
 					}
@@ -135,8 +135,8 @@ for more info.
 			if dstObj != nil {
 				// 如果目标文件存在且大小相同，则删除源文件
 				if deleteAfterCopy && obj.Size() == dstObj.Size() {
+					time.Sleep(3 * time.Second)  // 在检查文件之前等待
 					fs.Debugf(obj, "Deleting source file as it has same size as destination")
-					time.Sleep(3 * time.Second)
 					return operations.DeleteFile(context.Background(), obj)
 				}
 				fs.Debugf(obj, "Skipping as unchanged")
@@ -144,7 +144,7 @@ for more info.
 			}
 			err = operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
 			if err == nil && deleteAfterCopy {
-				time.Sleep(3 * time.Second)
+				time.Sleep(3 * time.Second)  // 在检查文件之前等待
 				return operations.DeleteFile(context.Background(), obj)
 			}
 			return err
