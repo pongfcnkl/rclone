@@ -4,6 +4,7 @@ package copy
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/fs"
@@ -111,12 +112,10 @@ for more info.
 				// 定义回调函数，在文件复制完成后删除源文件
 				callback := func(obj fs.Object) error {
 					if deleteAfterCopy {
-						// 检查目标文件是否存在且大小相同
-						dstObj, err := fdst.NewObject(context.Background(), obj.Remote())
-						if err == nil && dstObj != nil && obj.Size() == dstObj.Size() {
-							fs.Debugf(obj, "Deleting source file as it has same size as destination")
-							return operations.DeleteFile(context.Background(), obj)
-						}
+						// 只要复制成功就删除源文件，不检查大小
+						fs.Debugf(obj, "Deleting source file after successful copy")
+						time.Sleep(5 * time.Second)
+						return operations.DeleteFile(context.Background(), obj)
 					}
 					return nil
 				}
@@ -134,6 +133,7 @@ for more info.
 				// 如果目标文件存在且大小相同，则删除源文件
 				if deleteAfterCopy && obj.Size() == dstObj.Size() {
 					fs.Debugf(obj, "Deleting source file as it has same size as destination")
+					time.Sleep(2 * time.Second)
 					return operations.DeleteFile(context.Background(), obj)
 				}
 				fs.Debugf(obj, "Skipping as unchanged")
@@ -141,6 +141,7 @@ for more info.
 			}
 			err = operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
 			if err == nil && deleteAfterCopy {
+				time.Sleep(5 * time.Second)
 				return operations.DeleteFile(context.Background(), obj)
 			}
 			return err

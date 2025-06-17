@@ -617,58 +617,29 @@ func shouldRetry(err error) (bool, error) {
 
 // List implements fs.Fs
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	// 获取目录 ID
+	// 获取目录ID
 	dirID, err := f.getDirID(ctx, dir, "")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get directory ID: %v", err)
 	}
 
-	// 列出目录内容
+	// 获取目录内容
 	items, err := f.listDir(ctx, dirID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list directory: %v", err)
 	}
 
 	// 转换为 DirEntries
-	entries = make(fs.DirEntries, 0, len(items))
 	for _, item := range items {
-		// 构建远程路径
 		remote := path.Join(dir, item.Name)
-		
-		// 检查是否是目录
-		isDir := item.Type == "folder" || item.IsDirectory
-		
-		// 如果是目录，确保路径以 / 结尾
-		if isDir {
-			if !strings.HasSuffix(remote, "/") {
-				remote += "/"
-			}
-		}
-
-		// 创建目录或文件对象
-		if isDir {
-			entries = append(entries, &Object{
-				fs:          f,
-				remote:      remote,
-				id:          item.ID,
-				modTime:     time.Now(),
-				size:        0,
-				isDirectory: true,
-			})
+		if item.IsDirectory {
+			entries = append(entries, fs.NewDir(remote, time.Time{}))
 		} else {
-			// 解析时间
-			var modTime time.Time
-			if item.UpdatedAt != "" {
-				modTime, _ = time.Parse("2006-01-02 15:04:05", item.UpdatedAt)
-			} else {
-				modTime = time.Now()
-			}
-
 			entries = append(entries, &Object{
 				fs:          f,
 				remote:      remote,
 				id:          item.ID,
-				modTime:     modTime,
+				modTime:     time.Time{},
 				size:        item.Size,
 				hash:        item.Hash,
 				mimeType:    item.MimeType,
@@ -706,167 +677,45 @@ func (f *Fs) getRootFolderID(ctx context.Context) (string, error) {
 
 // getDirID 获取目录 ID
 func (f *Fs) getDirID(ctx context.Context, dir string, destPath string) (string, error) {
-	// 如果提供了目标路径，优先使用目标路径
-	if destPath != "" {
-		// 分割目标路径
-		parts := strings.Split(destPath, "/")
-		cleanParts := make([]string, 0, len(parts))
-		for _, part := range parts {
-			if part != "" && part != "." {
-				cleanParts = append(cleanParts, part)
-			}
-		}
-
-		// 如果清理后没有路径部分，返回根目录 ID
-		if len(cleanParts) == 0 {
-			return f.opt.RootFolderID, nil
-		}
-
-		// 从根目录开始遍历
-		currentID := f.opt.RootFolderID
-		currentPath := ""
-
-		// 遍历每一级目录
-		for i, part := range cleanParts {
-			currentPath = path.Join(currentPath, part)
-
-			// 检查缓存
-			if id, ok := f.dirCache[currentPath]; ok {
-				currentID = id
-				continue
-			}
-
-			// 获取当前目录下的文件列表
-			data := map[string]interface{}{
-				"parentFileId": currentID,
-				"pageInfo": map[string]interface{}{
-					"pageSize":    100,
-					"pageCursor":  "",
-				},
-				"orderBy":        "updated_at",
-				"orderDirection": "DESC",
-			}
-
-			opts := rest.Opts{
-				Method: "POST",
-				Path:   "/hcy/file/list",
-				Body:   bytes.NewReader(mustJSON(data)),
-			}
-
-			var resp PersonalListResp
-			result, err := f.request(ctx, &opts)
-			if err != nil {
-				return "", fmt.Errorf("failed to list directory %q: %v", currentPath, err)
-			}
-
-			err = json.Unmarshal(result, &resp)
-			if err != nil {
-				return "", fmt.Errorf("failed to parse directory list response: %v", err)
-			}
-
-			if !resp.Success {
-				return "", fmt.Errorf("failed to list directory %q: %s", currentPath, resp.Message)
-			}
-
-			// 查找目标目录
-			found := false
-			for _, item := range resp.Data.Items {
-				if item.Type == "folder" && item.Name == part {
-					currentID = item.FileId
-					f.dirCache[currentPath] = currentID
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				return "", fmt.Errorf("directory not found: %q", currentPath)
-			}
-
-			// 如果是最后一个部分，确保更新缓存
-			if i == len(cleanParts)-1 {
-				f.dirCache[destPath] = currentID
-			}
-		}
-
-		return currentID, nil
+	// 如果目录为空，返回根目录ID
+	if dir == "" {
+		return f.getRootFolderID(ctx)
 	}
 
-	// 如果没有提供目标路径，使用原来的逻辑
-	if dir == "" || dir == "." {
-		return f.opt.RootFolderID, nil
-	}
-
-	// 如果目录已经在缓存中，直接返回
+	// 检查缓存
 	if id, ok := f.dirCache[dir]; ok {
 		return id, nil
 	}
 
 	// 分割路径
-	parts := strings.Split(dir, "/")
-	cleanParts := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part != "" && part != "." {
-			cleanParts = append(cleanParts, part)
-		}
-	}
-
-	// 如果清理后没有路径部分，返回根目录 ID
-	if len(cleanParts) == 0 {
-		return f.opt.RootFolderID, nil
-	}
-
-	// 从根目录开始遍历
+	cleanParts := strings.Split(strings.Trim(dir, "/"), "/")
 	currentID := f.opt.RootFolderID
 	currentPath := ""
 
-	// 遍历每一级目录
+	// 逐级查找目录
 	for i, part := range cleanParts {
-		currentPath = path.Join(currentPath, part)
-
-		// 检查缓存
-		if id, ok := f.dirCache[currentPath]; ok {
-			currentID = id
+		// 跳过空目录名
+		if part == "" {
 			continue
 		}
 
+		if currentPath == "" {
+			currentPath = part
+		} else {
+			currentPath = currentPath + "/" + part
+		}
+
 		// 获取当前目录下的文件列表
-		data := map[string]interface{}{
-			"parentFileId": currentID,
-			"pageInfo": map[string]interface{}{
-				"pageSize":    100,
-				"pageCursor":  "",
-			},
-			"orderBy":        "updated_at",
-			"orderDirection": "DESC",
-		}
-
-		opts := rest.Opts{
-			Method: "POST",
-			Path:   "/hcy/file/list",
-			Body:   bytes.NewReader(mustJSON(data)),
-		}
-
-		var resp PersonalListResp
-		result, err := f.request(ctx, &opts)
+		items, err := f.listDir(ctx, currentID)
 		if err != nil {
 			return "", fmt.Errorf("failed to list directory %q: %v", currentPath, err)
 		}
 
-		err = json.Unmarshal(result, &resp)
-		if err != nil {
-			return "", fmt.Errorf("failed to parse directory list response: %v", err)
-		}
-
-		if !resp.Success {
-			return "", fmt.Errorf("failed to list directory %q: %s", currentPath, resp.Message)
-		}
-
 		// 查找目标目录
 		found := false
-		for _, item := range resp.Data.Items {
-			if item.Type == "folder" && item.Name == part {
-				currentID = item.FileId
+		for _, item := range items {
+			if item.IsDirectory && item.Name == part {
+				currentID = item.ID
 				f.dirCache[currentPath] = currentID
 				found = true
 				break
@@ -874,7 +723,37 @@ func (f *Fs) getDirID(ctx context.Context, dir string, destPath string) (string,
 		}
 
 		if !found {
-			return "", fmt.Errorf("directory not found: %q", currentPath)
+			// 如果是在目标路径中，创建新目录
+			if destPath != "" {
+				// 目录不存在，创建新目录
+				createData := map[string]interface{}{
+					"parentFileId": currentID,
+					"name":         part,
+					"type":         "folder",
+				}
+
+				var createResp struct {
+					BaseResp
+					Data struct {
+						FileId string `json:"fileId"`
+					} `json:"data"`
+				}
+
+				_, err := f.personalPost(ctx, "/hcy/file/create", createData, &createResp)
+				if err != nil {
+					return "", fmt.Errorf("create dir failed: %v", err)
+				}
+
+				if !createResp.Success {
+					return "", fmt.Errorf("create dir failed: %s", createResp.Message)
+				}
+
+				currentID = createResp.Data.FileId
+				f.dirCache[currentPath] = currentID
+			} else {
+				// 如果不在目标路径中，返回错误
+				return "", fmt.Errorf("directory not found: %s", currentPath)
+			}
 		}
 
 		// 如果是最后一个部分，确保更新缓存
@@ -900,66 +779,37 @@ func (f *Fs) listDir(ctx context.Context, dirID string) ([]FileItem, error) {
 		},
 		"orderBy":        "updated_at",
 		"orderDirection": "DESC",
-		"imageThumbnailStyleList": []string{
-			"Small",
-			"Large",
-		},
 	}
 
-	bodyBytes, err := json.Marshal(data)
+	var resp PersonalListResp
+	_, err := f.personalPost(ctx, "/hcy/file/list", data, &resp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %v", err)
+		return nil, fmt.Errorf("failed to list directory: %v", err)
 	}
 
-		opts := rest.Opts{
-			Method: "POST",
-		Path:   "/hcy/file/list",
-			Body:   bytes.NewReader(bodyBytes),
+	if !resp.Success {
+		return nil, fmt.Errorf("failed to list directory: %s", resp.Message)
 	}
 
-	var resp ListResp
-	result, err := f.request(ctx, &opts)
-			if err != nil {
-				return nil, err
-			}
-
-			err = json.Unmarshal(result, &resp)
-			if err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
-			}
-
-			if !resp.Success {
-		return nil, fmt.Errorf("API error: %s", resp.Message)
-	}
-
-	// 处理分页
-	allItems := resp.Data.Items
-	for resp.Data.NextPageCursor != "" {
-		data["pageInfo"].(map[string]interface{})["pageCursor"] = resp.Data.NextPageCursor
-		bodyBytes, err = json.Marshal(data)
-			if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %v", err)
+	// 转换 PersonalFileItem 到 FileItem
+	items := make([]FileItem, 0, len(resp.Data.Items))
+	for _, item := range resp.Data.Items {
+		fileItem := FileItem{
+			ID:          item.FileId,
+			Name:        item.Name,
+			Size:        item.Size,
+			Type:        item.Type,
+			CreatedAt:   item.CreatedAt,
+			UpdatedAt:   item.UpdatedAt,
+			IsDirectory: item.Type == "folder",
+			Hash:        "",
+			MimeType:    "",
+			Path:        "",
 		}
-		opts.Body = bytes.NewReader(bodyBytes)
-
-			result, err = f.request(ctx, &opts)
-			if err != nil {
-			return nil, err
-			}
-
-			err = json.Unmarshal(result, &resp)
-			if err != nil {
-			return nil, fmt.Errorf("failed to parse response: %v", err)
-			}
-
-			if !resp.Success {
-				return nil, fmt.Errorf("API error: %s", resp.Message)
-		}
-
-		allItems = append(allItems, resp.Data.Items...)
+		items = append(items, fileItem)
 	}
 
-	return allItems, nil
+	return items, nil
 }
 
 // NewObject implements fs.Fs
@@ -1059,17 +909,17 @@ func (f *Fs) initialize() error {
 	}
 
 	decodeStr := string(decode)
-	fmt.Printf("Decoded token: %s\n", decodeStr)
+//	fmt.Printf("Decoded token: %s\n", decodeStr)
 
 	splits := strings.Split(decodeStr, ":")
 	if len(splits) < 3 {
 		return fmt.Errorf("authorization is invalid: expected format 'client_id:account:token|version|type|expire_time|...', got %d parts", len(splits))
 	}
 
-	fmt.Printf("Token parts:\n")
-	fmt.Printf("  Client ID: %s\n", splits[0])
-	fmt.Printf("  Account: %s\n", splits[1])
-	fmt.Printf("  Token: %s\n", splits[2])
+//	fmt.Printf("Token parts:\n")
+//	fmt.Printf("  Client ID: %s\n", splits[0])
+//	fmt.Printf("  Account: %s\n", splits[1])
+//	fmt.Printf("  Token: %s\n", splits[2])
 
 	tokenParts := strings.Split(splits[2], "|")
 	if len(tokenParts) < 5 {
@@ -1193,20 +1043,100 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		destPath = src.Remote()
 	}
 
+	// 获取源文件的相对路径
+	srcPath := src.Remote()
+	
+	// 获取完整的远程路径，保持源文件的目录结构
+	remotePath := path.Join(destPath, srcPath)
+	
 	// 获取父目录路径
-	parentDir := path.Dir(destPath)
+	parentDir := path.Dir(remotePath)
 	if parentDir == "." {
 		parentDir = ""
 	}
 
-	// 获取父目录 ID
-	parentFileId, err := f.getDirID(ctx, parentDir, destPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get parent directory ID: %v", err)
+	// 分割父目录路径
+	parentParts := strings.Split(strings.Trim(parentDir, "/"), "/")
+	currentID := f.opt.RootFolderID
+
+	// 逐级创建目录
+	for _, part := range parentParts {
+		if part == "" {
+			continue
+		}
+
+		// 获取当前目录下的文件列表
+		items, err := f.listDir(ctx, currentID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list directory: %v", err)
+		}
+
+		// 查找目录
+		found := false
+		for _, item := range items {
+			if item.IsDirectory && item.Name == part {
+				currentID = item.ID
+				found = true
+				break
+			}
+		}
+
+		// 如果目录不存在，创建它
+		if !found {
+			createData := map[string]interface{}{
+				"parentFileId": currentID,
+				"name":         part,
+				"type":         "folder",
+			}
+
+			var createResp struct {
+				BaseResp
+				Data struct {
+					FileId string `json:"fileId"`
+				} `json:"data"`
+			}
+
+			_, err := f.personalPost(ctx, "/hcy/file/create", createData, &createResp)
+			if err != nil {
+				return nil, fmt.Errorf("create dir failed: %v", err)
+			}
+
+			if !createResp.Success {
+				return nil, fmt.Errorf("create dir failed: %s", createResp.Message)
+			}
+
+			currentID = createResp.Data.FileId
+		}
 	}
 
 	// 获取文件名
-	fileName := path.Base(src.Remote())
+	fileName := path.Base(remotePath)
+
+	// 检查文件是否已存在
+	items, err := f.listDir(ctx, currentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list directory: %v", err)
+	}
+
+	// 查找文件
+	for _, item := range items {
+		if !item.IsDirectory && item.Name == fileName {
+			// 文件已存在，返回现有对象
+			return &Object{
+				fs:          f,
+				remote:      remotePath,
+				id:          item.ID,
+				modTime:     time.Time{},
+				size:        item.Size,
+				hash:        item.Hash,
+				mimeType:    item.MimeType,
+				isDirectory: false,
+			}, nil
+		}
+	}
+
+	// 文件不存在，创建新文件
+	// ... 继续原有的文件上传逻辑 ...
 
 	// 计算文件哈希
 	var fullHash string
@@ -1266,11 +1196,11 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	data := map[string]interface{}{
 		"contentHash":          fullHash,
 		"contentHashAlgorithm": "SHA256",
-		"contentType":          "application/octet-stream",
+		"contentType":          "application/oct-stream",
 		"parallelUpload":       false,
 		"partInfos":            firstPartInfos,
 		"size":                 src.Size(),
-		"parentFileId":         parentFileId,
+		"parentFileId":         currentID,
 		"name":                 fileName,
 		"type":                 "file",
 		"fileRenameMode":       "auto_rename",
@@ -1301,7 +1231,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	if resp.Data.Exist {
 		return &Object{
 			fs:          f,
-			remote:      src.Remote(),
+			remote:      remotePath,
 			id:          resp.Data.FileId,
 			modTime:     src.ModTime(ctx),
 			size:        src.Size(),
@@ -1419,83 +1349,10 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		}
 	}
 
-	// 处理文件名冲突
-	if resp.Data.FileName != fileName {
-		// 给服务器一定时间处理数据
-		time.Sleep(time.Millisecond * 500)
-
-		// 获取文件列表
-		entries, err := f.List(ctx, parentDir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list directory after upload: %v", err)
-		}
-
-		// 删除旧文件
-		for _, entry := range entries {
-			if entry.Remote() == src.Remote() {
-				if obj, ok := entry.(*Object); ok {
-					// 删除前重命名旧文件
-					renameData := map[string]interface{}{
-						"fileId":      obj.id,
-						"name":        obj.remote + random.String(4),
-						"description": "",
-					}
-					opts = rest.Opts{
-						Method: "POST",
-						Path:   "/hcy/file/update",
-						Body:   bytes.NewReader(mustJSON(renameData)),
-					}
-					_, err = f.request(ctx, &opts)
-					if err != nil {
-						return nil, fmt.Errorf("failed to rename old file: %v", err)
-					}
-
-					// 删除旧文件
-					deleteData := map[string]interface{}{
-						"fileIds": []string{obj.id},
-					}
-					opts = rest.Opts{
-						Method: "POST",
-						Path:   "/hcy/file/batchDelete",
-						Body:   bytes.NewReader(mustJSON(deleteData)),
-					}
-					_, err = f.request(ctx, &opts)
-					if err != nil {
-						return nil, fmt.Errorf("failed to delete old file: %v", err)
-					}
-				}
-				break
-			}
-		}
-
-		// 重命名新文件
-		for _, entry := range entries {
-			if entry.Remote() == path.Join(parentDir, resp.Data.FileName) {
-				if obj, ok := entry.(*Object); ok {
-					renameData := map[string]interface{}{
-						"fileId":      obj.id,
-						"name":        fileName,
-						"description": "",
-					}
-					opts = rest.Opts{
-						Method: "POST",
-						Path:   "/hcy/file/update",
-						Body:   bytes.NewReader(mustJSON(renameData)),
-					}
-					_, err = f.request(ctx, &opts)
-					if err != nil {
-						return nil, fmt.Errorf("failed to rename new file: %v", err)
-					}
-				}
-				break
-			}
-		}
-	}
-
 	// 创建对象并返回
 	return &Object{
 		fs:          f,
-		remote:      src.Remote(),
+		remote:      remotePath,
 		id:          resp.Data.FileId,
 		modTime:     src.ModTime(ctx),
 		size:        src.Size(),
