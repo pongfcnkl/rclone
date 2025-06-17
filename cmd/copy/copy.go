@@ -119,6 +119,7 @@ for more info.
 							time.Sleep(3 * time.Second)
 							return operations.DeleteFile(context.Background(), obj)
 						}
+					}
 					return nil
 				}
 				// 修改CopyDir调用，添加noCheckDest参数
