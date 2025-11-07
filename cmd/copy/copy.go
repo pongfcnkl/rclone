@@ -17,6 +17,7 @@ import (
 var (
 	createEmptySrcDirs = false
 	deleteAfterCopy    = false
+    deleteAfterCopyNoCheck = false
 )
 
 func init() {
@@ -24,6 +25,7 @@ func init() {
 	cmdFlags := commandDefinition.Flags()
 	flags.BoolVarP(cmdFlags, &createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after copy", "")
 	flags.BoolVarP(cmdFlags, &deleteAfterCopy, "delete-after-copy", "", deleteAfterCopy, "Delete source files after successful copy, including identical files", "")
+    flags.BoolVarP(cmdFlags, &deleteAfterCopyNoCheck, "delete-after-copy-no-check", "", deleteAfterCopyNoCheck, "Delete source files immediately after successful copy without size check", "")
 }
 
 var commandDefinition = &cobra.Command{
@@ -85,6 +87,9 @@ recently very efficiently like this:
 Use the |--delete-after-copy| flag to delete source files after successful copy.
 Each file will be deleted immediately after it is successfully copied.
 
+Use the |--delete-after-copy-no-check| flag to delete source files immediately
+after a successful copy without checking destination size or metadata.
+
 Rclone will sync the modification times of files and directories if
 the backend supports it. If metadata syncing is required then use the
 |--metadata| flag.
@@ -111,7 +116,11 @@ for more info.
 			if srcFileName == "" {
 				// 定义回调函数，在文件复制完成后删除源文件
 				callback := func(obj fs.Object) error {
-					if deleteAfterCopy {
+                    if deleteAfterCopyNoCheck {
+                        fs.Debugf(obj, "Deleting source file after copy without size check")
+                        return operations.DeleteFile(context.Background(), obj)
+                    }
+                    if deleteAfterCopy {
 						time.Sleep(3 * time.Second)  // 在检查目录内容之前等待
 						// 检查目标文件是否存在且大小相同
 						dstObj, err := fdst.NewObject(context.Background(), obj.Remote())
@@ -134,19 +143,26 @@ for more info.
 			dstObj, _ := fdst.NewObject(context.Background(), srcFileName)
 			if dstObj != nil {
 				// 如果目标文件存在且大小相同，则删除源文件
-				if deleteAfterCopy && obj.Size() == dstObj.Size() {
+                if deleteAfterCopy && obj.Size() == dstObj.Size() {
 					time.Sleep(3 * time.Second)  // 在检查文件之前等待
 					fs.Debugf(obj, "Deleting source file as it has same size as destination")
 					return operations.DeleteFile(context.Background(), obj)
 				}
+                if deleteAfterCopyNoCheck {
+                    fs.Debugf(obj, "Deleting source file without size check as destination exists")
+                    return operations.DeleteFile(context.Background(), obj)
+                }
 				fs.Debugf(obj, "Skipping as unchanged")
 				return nil
 			}
 			err = operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
-			if err == nil && deleteAfterCopy {
+            if err == nil && deleteAfterCopy {
 				time.Sleep(3 * time.Second)  // 在检查文件之前等待
 				return operations.DeleteFile(context.Background(), obj)
 			}
+            if err == nil && deleteAfterCopyNoCheck {
+                return operations.DeleteFile(context.Background(), obj)
+            }
 			return err
 		})
 	},
