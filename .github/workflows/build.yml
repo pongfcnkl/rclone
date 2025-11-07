@@ -579,8 +579,11 @@ jobs:
           sed -i -r "s/^TERMUX_PKG_REVISION=(.*)$/TERMUX_PKG_REVISION=${{ env.revision }}/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_SRCURL=(.*)$/TERMUX_PKG_SRCURL=git+https:\/\/github.com\/pongfcnkl\/rclone/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_SHA256=(.*)$/TERMUX_PKG_GIT_BRANCH=${{ env.branch }}/g" packages/rclone/build.sh
-          sed -i -r "s/-ldflags \"(.*)\"/-ldflags \"-s -X github.com\/rclone\/rclone\/fs.Version=${{ env.version_all }}\"/g" packages/rclone/build.sh
-          sed -i -r "s/cp rclone.1 (.*)/cp rclone.1 \1\n\tzip \$HOME\/termux-packages\/output\/rclone-${{ env.version_all }}-termux-\$TERMUX_ARCH.zip rclone/g" packages/rclone/build.sh
+          sed -i -r "s/-ldflags \"(.*)\"/-ldflags \"-s -X github.com\\/rclone\\/rclone\\/fs.Version=${{ env.version_all }}\"/g" packages/rclone/build.sh
+          sed -i -r "s/cp rclone.1 (.*)/cp rclone.1 \1\n\tzip \$HOME\\/termux-packages\\/output\\/rclone-${{ env.version_all }}-termux-\$TERMUX_ARCH.zip rclone/g" packages/rclone/build.sh
+          # Remove problematic autocomplete patch which doesn't match our tree
+          sed -i -r 's/(^|\s)autocomplete_path.patch(\s|$)//g' packages/rclone/build.sh
+          rm -f packages/rclone/autocomplete_path.patch
           cd ./scripts
           ./run-docker.sh ./build-package.sh -a aarch64 rclone
           ./run-docker.sh ./build-package.sh -a arm rclone
@@ -596,8 +599,11 @@ jobs:
           sed -i -r "s/^TERMUX_PKG_REVISION=(.*)$/TERMUX_PKG_REVISION=${{ env.revision }}/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_SRCURL=(.*)$/TERMUX_PKG_SRCURL=git+https:\/\/github.com\/pongfcnkl\/rclone/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_SHA256=(.*)$/TERMUX_PKG_GIT_BRANCH=${{ env.branch }}/g" packages/rclone/build.sh
-          sed -i -r "s/-ldflags \"(.*)\"/-ldflags \"-s -X github.com\/rclone\/rclone\/fs.Version=${{ env.version_all }}\"/g" packages/rclone/build.sh
-          sed -i -r "s/cp rclone.1 (.*)/cp rclone.1 \1\n\tzip \$HOME\/termux-packages\/output\/rclone-${{ env.version_all }}-termux-\$TERMUX_ARCH.zip rclone/g" packages/rclone/build.sh
+          sed -i -r "s/-ldflags \"(.*)\"/-ldflags \"-s -X github.com\\/rclone\\/rclone\\/fs.Version=${{ env.version_all }}\"/g" packages/rclone/build.sh
+          sed -i -r "s/cp rclone.1 (.*)/cp rclone.1 \1\n\tzip \$HOME\\/termux-packages\\/output\\/rclone-${{ env.version_all }}-termux-\$TERMUX_ARCH.zip rclone/g" packages/rclone/build.sh
+          # Remove problematic autocomplete patch which doesn't match our tree
+          sed -i -r 's/(^|\s)autocomplete_path.patch(\s|$)//g' packages/rclone/build.sh
+          rm -f packages/rclone/autocomplete_path.patch
           cd ./scripts
           ./run-docker.sh ./build-package.sh -a aarch64 rclone
           ./run-docker.sh ./build-package.sh -a arm rclone
