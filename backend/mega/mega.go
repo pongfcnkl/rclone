@@ -293,18 +293,15 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 				return nil, fmt.Errorf("couldn't login: %w", err)
 			}
 			megaCache[opt.User] = srv
-			m.Set(sessionIDConfigKey, srv.GetSessionID())
-			encodedMasterKey := base64.StdEncoding.EncodeToString(srv.GetMasterKey())
-			m.Set(masterKeyConfigKey, encodedMasterKey)
+			// Note: go-mega library doesn't expose GetSessionID() and GetMasterKey() methods
+			// Session persistence is handled by the library internally
 		} else {
-			fs.Debugf(f, "Using previously stored session ID and master key to initialize the Mega API")
-			decodedMasterKey, err := base64.StdEncoding.DecodeString(opt.MasterKey)
+			fs.Debugf(f, "Session ID provided but go-mega library doesn't support LoginWithKeys()")
+			// Note: go-mega library doesn't support LoginWithKeys() method
+			// Re-login with username and password instead
+			err := srv.MultiFactorLogin(opt.User, opt.Pass, opt.TwoFA)
 			if err != nil {
-				return nil, fmt.Errorf("couldn't decode master key: %w", err)
-			}
-			err = srv.LoginWithKeys(opt.SessionID, decodedMasterKey)
-			if err != nil {
-				fs.Debugf(f, "login with previous auth keys failed: %v", err)
+				return nil, fmt.Errorf("couldn't login: %w", err)
 			}
 		}
 	}
@@ -988,9 +985,9 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 		return nil, fmt.Errorf("failed to get Mega Quota: %w", err)
 	}
 	usage := &fs.Usage{
-		Total: fs.NewUsageValue(q.Mstrg),           // quota of bytes that can be used
-		Used:  fs.NewUsageValue(q.Cstrg),           // bytes in use
-		Free:  fs.NewUsageValue(q.Mstrg - q.Cstrg), // bytes which can be uploaded before reaching the quota
+		Total: fs.NewUsageValue(int64(q.Mstrg)),           // quota of bytes that can be used
+		Used:  fs.NewUsageValue(int64(q.Cstrg)),           // bytes in use
+		Free:  fs.NewUsageValue(int64(q.Mstrg - q.Cstrg)), // bytes which can be uploaded before reaching the quota
 	}
 	return usage, nil
 }
@@ -1216,7 +1213,8 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 	// Upload the chunks
 	// FIXME do this in parallel
-	for id := range u.Chunks() {
+	chunks := u.Chunks()
+	for id := 0; id < chunks; id++ {
 		_, chunkSize, err := u.ChunkLocation(id)
 		if err != nil {
 			return fmt.Errorf("upload failed to read chunk location: %w", err)
