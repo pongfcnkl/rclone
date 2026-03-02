@@ -157,13 +157,7 @@ type ossChunkWriter struct {
 	imur          *oss.InitiateMultipartUploadResult
 }
 
-func (f *Fs) newChunkWriter(ctx context.Context, remote string, src fs.ObjectInfo, ui *api.UploadInitInfo, in io.Reader, options ...fs.OpenOption) (w *ossChunkWriter, err error) {
-	// Temporary Object under construction
-	o := &Object{
-		fs:     f,
-		remote: remote,
-	}
-
+func (f *Fs) newChunkWriter(ctx context.Context, src fs.ObjectInfo, ui *api.UploadInitInfo, in io.Reader, o *Object, options ...fs.OpenOption) (w *ossChunkWriter, err error) {
 	uploadParts := min(max(1, f.opt.MaxUploadParts), maxUploadParts)
 	size := src.Size()
 
@@ -185,16 +179,22 @@ func (f *Fs) newChunkWriter(ctx context.Context, remote string, src fs.ObjectInf
 	w = &ossChunkWriter{
 		chunkSize: int64(chunkSize),
 		size:      size,
-		con:       max(1, f.opt.UploadConcurrency),
+		con:       1,
 		f:         f,
 		o:         o,
 		in:        in,
-		client:    f.newOSSClient(),
 	}
 
+	var client *oss.Client
+	client, err = f.newOSSClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OSS client: %w", err)
+	}
+	w.client = client
+
 	req := &oss.InitiateMultipartUploadRequest{
-		Bucket: oss.Ptr(ui.Bucket),
-		Key:    oss.Ptr(ui.Object),
+		Bucket: oss.Ptr(ui.GetBucket()),
+		Key:    oss.Ptr(ui.GetObject()),
 	}
 	req.Parameters = map[string]string{"x-oss-enable-sha1": ""}
 	if w.con == 1 {
@@ -217,7 +217,7 @@ func (f *Fs) newChunkWriter(ctx context.Context, remote string, src fs.ObjectInf
 			req.ContentType = oss.Ptr(value)
 		}
 	}
-	err = w.f.pacer.Call(func() (bool, error) {
+	err = w.f.globalPacer.Call(func() (bool, error) {
 		w.imur, err = w.client.InitiateMultipartUpload(ctx, req)
 		return w.shouldRetry(ctx, err)
 	})
@@ -277,7 +277,7 @@ func (w *ossChunkWriter) WriteChunk(ctx context.Context, chunkNumber int32, read
 
 	ossPartNumber := chunkNumber + 1
 	var res *oss.UploadPartResult
-	err = w.f.pacer.Call(func() (bool, error) {
+	err = w.f.globalPacer.Call(func() (bool, error) {
 		// Discover the size by seeking to the end
 		currentChunkSize, err = reader.Seek(0, io.SeekEnd)
 		if err != nil {
@@ -289,8 +289,8 @@ func (w *ossChunkWriter) WriteChunk(ctx context.Context, chunkNumber int32, read
 			return false, err
 		}
 		res, err = w.client.UploadPart(ctx, &oss.UploadPartRequest{
-			Bucket:     w.imur.Bucket,
-			Key:        w.imur.Key,
+			Bucket:     oss.Ptr(*w.imur.Bucket),
+			Key:        oss.Ptr(*w.imur.Key),
 			UploadId:   w.imur.UploadId,
 			PartNumber: ossPartNumber,
 			Body:       reader,
@@ -320,10 +320,10 @@ func (w *ossChunkWriter) WriteChunk(ctx context.Context, chunkNumber int32, read
 // Abort the multipart upload
 func (w *ossChunkWriter) Abort(ctx context.Context) (err error) {
 	// Abort the upload session
-	err = w.f.pacer.Call(func() (bool, error) {
+	err = w.f.globalPacer.Call(func() (bool, error) {
 		_, err = w.client.AbortMultipartUpload(ctx, &oss.AbortMultipartUploadRequest{
-			Bucket:   w.imur.Bucket,
-			Key:      w.imur.Key,
+			Bucket:   oss.Ptr(*w.imur.Bucket),
+			Key:      oss.Ptr(*w.imur.Key),
 			UploadId: w.imur.UploadId,
 		})
 		return w.shouldRetry(ctx, err)
@@ -340,17 +340,19 @@ func (w *ossChunkWriter) Abort(ctx context.Context) (err error) {
 func (w *ossChunkWriter) Close(ctx context.Context) (err error) {
 	// Finalise the upload session
 	var res *oss.CompleteMultipartUploadResult
-	err = w.f.pacer.Call(func() (bool, error) {
-		res, err = w.client.CompleteMultipartUpload(ctx, &oss.CompleteMultipartUploadRequest{
-			Bucket:   w.imur.Bucket,
-			Key:      w.imur.Key,
-			UploadId: w.imur.UploadId,
-			CompleteMultipartUpload: &oss.CompleteMultipartUpload{
-				Parts: w.uploadedParts,
-			},
-			Callback:    oss.Ptr(w.callback),
-			CallbackVar: oss.Ptr(w.callbackVar),
-		})
+	req := &oss.CompleteMultipartUploadRequest{
+		Bucket:   oss.Ptr(*w.imur.Bucket),
+		Key:      oss.Ptr(*w.imur.Key),
+		UploadId: w.imur.UploadId,
+		CompleteMultipartUpload: &oss.CompleteMultipartUpload{
+			Parts: w.uploadedParts,
+		},
+		Callback:    oss.Ptr(w.callback),
+		CallbackVar: oss.Ptr(w.callbackVar),
+	}
+	req.Headers = map[string]string{"x-oss-hash-sha1": w.o.sha1sum}
+	err = w.f.globalPacer.Call(func() (bool, error) {
+		res, err = w.client.CompleteMultipartUpload(ctx, req)
 		return w.shouldRetry(ctx, err)
 	})
 	if err != nil {
