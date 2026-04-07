@@ -8,6 +8,7 @@ import (
 	_ "github.com/rclone/rclone/backend/alias"
 	_ "github.com/rclone/rclone/backend/alist"
 	_ "github.com/rclone/rclone/backend/aliyunpds"
+	_ "github.com/rclone/rclone/backend/baidu"
 	_ "github.com/rclone/rclone/backend/azureblob"
 	_ "github.com/rclone/rclone/backend/azurefiles"
 	_ "github.com/rclone/rclone/backend/b2"
