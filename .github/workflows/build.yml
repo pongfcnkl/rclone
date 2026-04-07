@@ -573,6 +573,14 @@ jobs:
         if: github.event_name == 'push' && contains(github.ref, 'refs/heads/')
         shell: bash
         run: |
+          build_termux() {
+            local arch="$1"
+            docker run --rm --privileged \
+              -v "$PWD:/home/builder/termux-packages" \
+              -w /home/builder/termux-packages \
+              ghcr.io/termux/package-builder \
+              ./build-package.sh -a "$arch" rclone
+          }
           sed -i -r "s/^TERMUX_PKG_MAINTAINER=(.*)$/TERMUX_PKG_MAINTAINER=\"@pongfcnkl\"/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_VERSION=(.*)$/TERMUX_PKG_VERSION=\"${{ env.version }}\"/g" packages/rclone/build.sh
           grep -q "^TERMUX_PKG_REVISION" packages/rclone/build.sh || sed -i "/^TERMUX_PKG_VERSION=/a TERMUX_PKG_REVISION=0" packages/rclone/build.sh
@@ -584,15 +592,22 @@ jobs:
           # Remove problematic autocomplete patch which doesn't match our tree
           sed -i -r 's/(^|\s)autocomplete_path.patch(\s|$)//g' packages/rclone/build.sh
           rm -f packages/rclone/autocomplete_path.patch
-          cd ./scripts
-          ./run-docker.sh ./build-package.sh -a aarch64 rclone
-          ./run-docker.sh ./build-package.sh -a arm rclone
-          cd ../output
+          build_termux aarch64
+          build_termux arm
+          cd ./output
           for file in *.deb; do mvto=$(sed -r "s/^rclone_(.*)_(.*)$/rclone-${{ env.version_all }}-termux-\2/g" <<< ${file}); mv "$file" "$mvto"; done
       - name: build (release)
         if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
         shell: bash
         run: |
+          build_termux() {
+            local arch="$1"
+            docker run --rm --privileged \
+              -v "$PWD:/home/builder/termux-packages" \
+              -w /home/builder/termux-packages \
+              ghcr.io/termux/package-builder \
+              ./build-package.sh -a "$arch" rclone
+          }
           sed -i -r "s/^TERMUX_PKG_MAINTAINER=(.*)$/TERMUX_PKG_MAINTAINER=\"@pongfcnkl\"/g" packages/rclone/build.sh
           sed -i -r "s/^TERMUX_PKG_VERSION=(.*)$/TERMUX_PKG_VERSION=\"${{ env.version }}\"/g" packages/rclone/build.sh
           grep -q "^TERMUX_PKG_REVISION" packages/rclone/build.sh || sed -i "/^TERMUX_PKG_VERSION=/a TERMUX_PKG_REVISION=0" packages/rclone/build.sh
@@ -604,10 +619,9 @@ jobs:
           # Remove problematic autocomplete patch which doesn't match our tree
           sed -i -r 's/(^|\s)autocomplete_path.patch(\s|$)//g' packages/rclone/build.sh
           rm -f packages/rclone/autocomplete_path.patch
-          cd ./scripts
-          ./run-docker.sh ./build-package.sh -a aarch64 rclone
-          ./run-docker.sh ./build-package.sh -a arm rclone
-          cd ../output
+          build_termux aarch64
+          build_termux arm
+          cd ./output
           for file in *.deb; do mvto=$(sed -r "s/^rclone_(.*)_(.*)$/rclone-${{ env.version_all }}-termux-\2/g" <<< ${file}); mv "$file" "$mvto"; done
       # - 
       #   if: ${{ contains(github.ref, 'refs/tags/') }}
