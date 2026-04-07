@@ -328,13 +328,17 @@ func (f *Fs) upload(ctx context.Context, in io.Reader, src fs.ObjectInfo, option
 				return err
 			}
 			section := io.Reader(rc)
+			closeReader := io.Closer(rc)
 			if acc != nil {
 				section = acc.WrapStream(section)
 			} else if transfer != nil {
 				section = transfer.Account(ctx, rc)
 			}
+			if closer, ok := section.(io.Closer); ok {
+				closeReader = closer
+			}
 			md5sum, err := f.uploadSlice(ctx, precreate.UploadURL, fullPath, precreate.UploadID, part, path.Base(fullPath), section, size, options)
-			_ = rc.Close()
+			_ = closeReader.Close()
 			if err != nil {
 				if transfer != nil {
 					transfer.Done(ctx, err)
