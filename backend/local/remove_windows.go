@@ -23,10 +23,17 @@ func remove(name string) (err error) {
 		if !ok {
 			break
 		}
-		if pathErr.Err != windows.ERROR_SHARING_VIOLATION {
-			break
+		if pathErr.Err == windows.ERROR_ACCESS_DENIED {
+			// Read-only files on Windows return access denied on delete.
+			// Clear the attribute once, then let the loop retry removal.
+			_ = os.Chmod(name, 0o666)
 		}
-		fs.Logf(name, "Remove detected sharing violation - retry %d/%d sleeping %v", i+1, maxTries, sleepTime)
+		if pathErr.Err != windows.ERROR_SHARING_VIOLATION {
+			if pathErr.Err != windows.ERROR_ACCESS_DENIED {
+				break
+			}
+		}
+		fs.Logf(name, "Remove retry %d/%d after %v due to %v", i+1, maxTries, sleepTime, pathErr.Err)
 		time.Sleep(sleepTime)
 		sleepTime <<= 1
 	}

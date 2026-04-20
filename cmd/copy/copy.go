@@ -10,14 +10,14 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/rclone/rclone/fs/operations"
-	"github.com/rclone/rclone/fs/sync"
+	fssync "github.com/rclone/rclone/fs/sync"
 	"github.com/spf13/cobra"
 )
 
 var (
-	createEmptySrcDirs = false
-	deleteAfterCopy    = false
-    deleteAfterCopyNoCheck = false
+	createEmptySrcDirs     = false
+	deleteAfterCopy        = false
+	deleteAfterCopyNoCheck = false
 )
 
 func init() {
@@ -25,13 +25,12 @@ func init() {
 	cmdFlags := commandDefinition.Flags()
 	flags.BoolVarP(cmdFlags, &createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after copy", "")
 	flags.BoolVarP(cmdFlags, &deleteAfterCopy, "delete-after-copy", "", deleteAfterCopy, "Delete source files after successful copy, including identical files", "")
-    flags.BoolVarP(cmdFlags, &deleteAfterCopyNoCheck, "delete-after-copy-no-check", "", deleteAfterCopyNoCheck, "Delete source files immediately after successful copy without size check", "")
+	flags.BoolVarP(cmdFlags, &deleteAfterCopyNoCheck, "delete-after-copy-no-check", "", deleteAfterCopyNoCheck, "Delete source files immediately after successful copy without size check", "")
 }
 
 var commandDefinition = &cobra.Command{
 	Use:   "copy source:path dest:path",
 	Short: `Copy files from source to dest, skipping identical files.`,
-	// Note: "|" will be replaced by backticks below
 	Long: strings.ReplaceAll(`Copy the source to the destination.  Does not transfer files that are
 identical on source and destination, testing by size and modification
 time or MD5SUM.  Doesn't delete files from the destination. If you
@@ -85,10 +84,11 @@ recently very efficiently like this:
     rclone copy --max-age 24h --no-traverse /path/to/src remote:
 
 Use the |--delete-after-copy| flag to delete source files after successful copy.
-Each file will be deleted immediately after it is successfully copied.
+Each file will be deleted after the copy phase has finished and the source
+file has had time to be released.
 
-Use the |--delete-after-copy-no-check| flag to delete source files immediately
-after a successful copy without checking destination size or metadata.
+Use the |--delete-after-copy-no-check| flag to delete source files after a
+successful copy without checking destination size or metadata.
 
 Rclone will sync the modification times of files and directories if
 the backend supports it. If metadata syncing is required then use the
@@ -108,62 +108,68 @@ for more info.
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(2, 2, command, args)
 		fsrc, srcFileName, fdst := cmd.NewFsSrcFileDst(args)
-		// mod
 		if len(fsrc.Root()) > 7 && fsrc.Root()[0:7] == "isFile:" {
 			srcFileName = fsrc.Root()[7:]
 		}
 		cmd.Run(true, true, command, func() error {
 			if srcFileName == "" {
-				// 定义回调函数，在文件复制完成后删除源文件
-				callback := func(obj fs.Object) error {
-                    if deleteAfterCopyNoCheck {
-                        fs.Debugf(obj, "Deleting source file after copy without size check")
-                        return operations.DeleteFile(context.Background(), obj)
-                    }
-                    if deleteAfterCopy {
-						time.Sleep(3 * time.Second)  // 在检查目录内容之前等待
-						// 检查目标文件是否存在且大小相同
-						dstObj, err := fdst.NewObject(context.Background(), obj.Remote())
-						if err == nil && dstObj != nil && obj.Size() == dstObj.Size() {
-							fs.Debugf(obj, "Deleting source file as it has same size as destination")
-							return operations.DeleteFile(context.Background(), obj)
-						}
-					}
-					return nil
-				}
-				// 修改CopyDir调用，添加noCheckDest参数
-				return sync.CopyDir(context.Background(), fdst, fsrc, createEmptySrcDirs, callback)
+				return copyDirAndDeleteSources(fsrc, fdst)
 			}
-			// 获取源文件对象
-			obj, err := fsrc.NewObject(context.Background(), srcFileName)
-			if err != nil {
-				return err
-			}
-			// 检查目标文件是否存在
-			dstObj, _ := fdst.NewObject(context.Background(), srcFileName)
-			if dstObj != nil {
-				// 如果目标文件存在且大小相同，则删除源文件
-                if deleteAfterCopy && obj.Size() == dstObj.Size() {
-					time.Sleep(3 * time.Second)  // 在检查文件之前等待
-					fs.Debugf(obj, "Deleting source file as it has same size as destination")
-					return operations.DeleteFile(context.Background(), obj)
-				}
-                if deleteAfterCopyNoCheck {
-                    fs.Debugf(obj, "Deleting source file without size check as destination exists")
-                    return operations.DeleteFile(context.Background(), obj)
-                }
-				fs.Debugf(obj, "Skipping as unchanged")
-				return nil
-			}
-			err = operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
-            if err == nil && deleteAfterCopy {
-				time.Sleep(3 * time.Second)  // 在检查文件之前等待
-				return operations.DeleteFile(context.Background(), obj)
-			}
-            if err == nil && deleteAfterCopyNoCheck {
-                return operations.DeleteFile(context.Background(), obj)
-            }
-			return err
+			return copyFileAndDeleteSource(fsrc, fdst, srcFileName)
 		})
 	},
+}
+
+func copyDirAndDeleteSources(fsrc, fdst fs.Fs) error {
+	callback := func(obj fs.Object) error {
+		if deleteAfterCopyNoCheck {
+			fs.Debugf(obj, "Deleting source file after copy without size check")
+			return waitAndDeleteSource(obj)
+		}
+		if deleteAfterCopy {
+			dstObj, err := fdst.NewObject(context.Background(), obj.Remote())
+			if err == nil && dstObj != nil && obj.Size() == dstObj.Size() {
+				fs.Debugf(obj, "Deleting source file as it has same size as destination")
+				return waitAndDeleteSource(obj)
+			}
+		}
+		return nil
+	}
+	return fssync.CopyDir(context.Background(), fdst, fsrc, createEmptySrcDirs, callback)
+}
+
+func copyFileAndDeleteSource(fsrc, fdst fs.Fs, srcFileName string) error {
+	obj, err := fsrc.NewObject(context.Background(), srcFileName)
+	if err != nil {
+		return err
+	}
+	dstObj, _ := fdst.NewObject(context.Background(), srcFileName)
+	if dstObj != nil {
+		if deleteAfterCopy && obj.Size() == dstObj.Size() {
+			fs.Debugf(obj, "Deleting source file as it has same size as destination")
+			return waitAndDeleteSource(obj)
+		}
+		if deleteAfterCopyNoCheck {
+			fs.Debugf(obj, "Deleting source file without size check as destination exists")
+			return waitAndDeleteSource(obj)
+		}
+		fs.Debugf(obj, "Skipping as unchanged")
+		return nil
+	}
+	err = operations.CopyFile(context.Background(), fdst, fsrc, srcFileName, srcFileName)
+	if err != nil {
+		return err
+	}
+	if deleteAfterCopy {
+		return waitAndDeleteSource(obj)
+	}
+	if deleteAfterCopyNoCheck {
+		return waitAndDeleteSource(obj)
+	}
+	return nil
+}
+
+func waitAndDeleteSource(obj fs.Object) error {
+	time.Sleep(2 * time.Second)
+	return operations.DeleteFile(context.Background(), obj)
 }
