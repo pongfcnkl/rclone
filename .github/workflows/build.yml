@@ -25,18 +25,35 @@ on:
 jobs:
   create-release:
     runs-on: ubuntu-latest
-    if: github.head_ref == '' && github.repository == 'pongfcnkl/rclone'
+    if: github.event_name == 'push' && github.repository == 'pongfcnkl/rclone'
     outputs:
-      upload_url: ${{ steps.set_upload_url.outputs.upload_url }}
+      release_tag: ${{ steps.release_meta.outputs.release_tag }}
+      release_name: ${{ steps.release_meta.outputs.release_name }}
     steps:
+      -
+        name: Set Release Metadata
+        id: release_meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "release_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "release_name=rclone ${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            SAFE_BRANCH=$(printf '%s' "${GITHUB_REF_NAME}" | tr '/ ' '--')
+            echo "release_tag=ci-${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "release_name=rclone CI ${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
       - 
         name: Create Release
-        if: ${{ contains(github.ref, 'refs/tags/') }}
         id: new_release
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{ github.ref }}
-          name: rclone ${{ github.ref_name }}
+          allowUpdates: true
+          removeArtifacts: true
+          replacesArtifacts: true
+          tag: ${{ steps.release_meta.outputs.release_tag }}
+          name: ${{ steps.release_meta.outputs.release_name }}
+          commit: ${{ github.sha }}
           body: |
             ## What's Changed
 
@@ -44,15 +61,8 @@ jobs:
             ```bash
             curl -fsSL https://raw.githubusercontent.com/pongfcnkl/rclone/mod/install.sh | sudo bash 
             ```
-          draft: true
-          prerelease: false
-      - 
-        name: Set Upload URL
-        id: set_upload_url
-        run: |
-          if [ "${{ contains(github.ref, 'refs/tags/') }}" = "true" ]; then
-            echo "upload_url=${{ steps.new_release.outputs.upload_url }}" >> "$GITHUB_OUTPUT"
-          fi
+          draft: false
+          prerelease: ${{ ! startsWith(github.ref, 'refs/tags/') }}
   
   build-armv7l:
     needs:
@@ -91,9 +101,10 @@ jobs:
           zip -j build/armv7l/rclone-armv7l.zip rclone-armv7l
 
       - name: Upload armv7l release asset
-        if: ${{ contains(github.ref, 'refs/tags/') }}
+        if: ${{ github.event_name == 'push' && github.repository == 'pongfcnkl/rclone' }}
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.create-release.outputs.release_tag }}
           files: build/armv7l/rclone-armv7l.zip
           
   build:
@@ -328,13 +339,17 @@ jobs:
         # Deploy binaries if enabled in config && not a PR && not a fork
         if: matrix.deploy && github.head_ref == '' && github.repository == 'pongfcnkl/rclone'
       - 
-        if: ${{ contains(github.ref, 'refs/tags/') }}
+        if: ${{ github.event_name == 'push' && github.repository == 'pongfcnkl/rclone' }}
         name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.create-release.outputs.release_tag }}
           files: |
-            build/
-            build/${{ matrix.job_name }}/
+            build/${{ matrix.job_name }}/*
+            build/*.zip
+            build/*.deb
+            build/*.rpm
+            build/*.tar.gz
 
   # lint:
   #   if: inputs.manual || (github.repository == 'pongfcnkl/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
@@ -619,10 +634,11 @@ jobs:
       #         "${UPLOAD_URL}?name=$(basename ${FILE})"
       #     done
       - 
-        if: ${{ contains(github.ref, 'refs/tags/') }}
+        if: ${{ github.event_name == 'push' && github.repository == 'pongfcnkl/rclone' }}
         name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.create-release.outputs.release_tag }}
           files: |
-            output/
+            output/*
 
