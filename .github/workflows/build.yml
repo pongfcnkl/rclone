@@ -4,6 +4,9 @@
 
 name: build
 
+permissions:
+  contents: write
+
 # Trigger the workflow on push or pull request
 on:
   push:
@@ -87,11 +90,11 @@ jobs:
           mkdir -p build/armv7l
           zip -j build/armv7l/rclone-armv7l.zip rclone-armv7l
 
-      - name: Upload armv7l artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload armv7l release asset
+        if: ${{ contains(github.ref, 'refs/tags/') }}
+        uses: softprops/action-gh-release@v2
         with:
-          name: rclone-armv7l
-          path: build/armv7l/rclone-armv7l.zip
+          files: build/armv7l/rclone-armv7l.zip
           
   build:
     needs:
@@ -283,13 +286,6 @@ jobs:
             make
           fi
 
-      - name: Upload Windows 7 Build Artifact
-        if: ${{ matrix.job_name == 'windows_7' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: rclone-windows-7
-          path: build/windows_7/rclone-win7.zip
-
       - name: Rclone version
         shell: bash
         run: |
@@ -333,31 +329,12 @@ jobs:
         if: matrix.deploy && github.head_ref == '' && github.repository == 'pongfcnkl/rclone'
       - 
         if: ${{ contains(github.ref, 'refs/tags/') }}
-        name: Upload Release Artifact
-        uses: actions/upload-artifact@v4
+        name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ matrix.job_name }}
-          if-no-files-found: ignore
-          path: |
+          files: |
             build/
             build/${{ matrix.job_name }}/
-      - 
-        if: ${{ ! contains(github.ref, 'refs/tags/') }}
-        name: Upload Test Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.job_name }}
-          if-no-files-found: ignore
-          path: |
-            build/${{ matrix.job_name }}/
-            build/${{ matrix.job_name }}/*.zip
-            build/${{ matrix.job_name }}/*.deb
-            build/${{ matrix.job_name }}/*.rpm
-            build/${{ matrix.job_name }}/*.tar.gz
-            build/*.zip
-            build/*.deb
-            build/*.rpm
-            build/*.tar.gz
 
   # lint:
   #   if: inputs.manual || (github.repository == 'pongfcnkl/rclone' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name))
@@ -643,47 +620,9 @@ jobs:
       #     done
       - 
         if: ${{ contains(github.ref, 'refs/tags/') }}
-        name: Upload Release Artifact
-        uses: actions/upload-artifact@v4
+        name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
         with:
-          name: termux
-          if-no-files-found: ignore
-          path: |
+          files: |
             output/
-      - 
-        if: ${{ ! contains(github.ref, 'refs/tags/') }}
-        name: Upload Test Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux
-          if-no-files-found: ignore
-          path: |
-            output/*.zip
 
-  upload-release:
-    if: ${{ contains(github.ref, 'refs/tags/') }}
-    needs: [create-release, build, termux, build-armv7l]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: build/
-          merge-multiple: true
-      - name: Checksums
-        shell: bash
-        run: |
-          cd build || exit 1
-          md5sum rclone-v* > MD5SUMS
-          sha1sum rclone-v* > SHA1SUMS
-          sha256sum rclone-v* > SHA256SUMS
-      - 
-        name: Upload Assets to Release
-        uses: shogo82148/actions-upload-release-asset@v1
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: 'build/*'
