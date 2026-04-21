@@ -232,6 +232,7 @@ func (f *Fs) newOSSClient(token *uploadTokenData) (*oss.Client, error) {
 
 func (f *Fs) multipartUploadFromSource(ctx context.Context, client *oss.Client, token *uploadTokenData, source *reopenableSource, src fs.ObjectInfo, acc *accounting.Account, transfer *accounting.Transfer, options ...fs.OpenOption) error {
 	partSize := calcUploadPartSize(src.Size())
+	var progressAcc *accounting.Account
 	initReq := &oss.InitiateMultipartUploadRequest{
 		Bucket: oss.Ptr(token.BucketName),
 		Key:    oss.Ptr(token.ObjectPath),
@@ -251,7 +252,7 @@ func (f *Fs) multipartUploadFromSource(ctx context.Context, client *oss.Client, 
 		if err != nil {
 			return abortMultipart(ctx, client, token, uploadInfo, err)
 		}
-		body := wrapUploadReader(ctx, rc, acc, transfer)
+		body := wrapUploadReader(ctx, rc, acc, transfer, &progressAcc)
 		req := &oss.UploadPartRequest{
 			Bucket:     oss.Ptr(token.BucketName),
 			Key:        oss.Ptr(token.ObjectPath),
@@ -282,6 +283,7 @@ func (f *Fs) multipartUploadFromSource(ctx context.Context, client *oss.Client, 
 
 func (f *Fs) multipartUploadFromReader(ctx context.Context, client *oss.Client, token *uploadTokenData, in io.Reader, src fs.ObjectInfo, acc *accounting.Account, transfer *accounting.Transfer, options ...fs.OpenOption) error {
 	partSize := calcUploadPartSize(src.Size())
+	var progressAcc *accounting.Account
 	initReq := &oss.InitiateMultipartUploadRequest{
 		Bucket: oss.Ptr(token.BucketName),
 		Key:    oss.Ptr(token.ObjectPath),
@@ -299,7 +301,7 @@ func (f *Fs) multipartUploadFromReader(ctx context.Context, client *oss.Client, 
 			curPartSize = remaining
 		}
 		partReader := io.LimitReader(in, curPartSize)
-		body := wrapUploadReader(ctx, io.NopCloser(partReader), acc, transfer)
+		body := wrapUploadReader(ctx, io.NopCloser(partReader), acc, transfer, &progressAcc)
 		req := &oss.UploadPartRequest{
 			Bucket:     oss.Ptr(token.BucketName),
 			Key:        oss.Ptr(token.ObjectPath),
@@ -329,7 +331,7 @@ func (f *Fs) multipartUploadFromReader(ctx context.Context, client *oss.Client, 
 	return err
 }
 
-func wrapUploadReader(ctx context.Context, rc io.ReadCloser, acc *accounting.Account, transfer *accounting.Transfer) io.ReadCloser {
+func wrapUploadReader(ctx context.Context, rc io.ReadCloser, acc *accounting.Account, transfer *accounting.Transfer, progressAcc **accounting.Account) io.ReadCloser {
 	if acc != nil {
 		return readCloserWithReader{
 			Reader: acc.WrapStream(rc),
@@ -337,7 +339,17 @@ func wrapUploadReader(ctx context.Context, rc io.ReadCloser, acc *accounting.Acc
 		}
 	}
 	if transfer != nil {
-		return transfer.Account(ctx, rc)
+		if progressAcc != nil && *progressAcc != nil {
+			return readCloserWithReader{
+				Reader: (*progressAcc).WrapStream(rc),
+				Closer: rc,
+			}
+		}
+		wrapped := transfer.Account(ctx, rc)
+		if progressAcc != nil {
+			*progressAcc = wrapped
+		}
+		return wrapped
 	}
 	return rc
 }
