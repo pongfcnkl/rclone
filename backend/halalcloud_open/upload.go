@@ -129,6 +129,7 @@ func (f *Fs) uploadFromSource(ctx context.Context, source *reopenableSource, acc
 	}
 	partCount := (src.Size() + blockSize - 1) / blockSize
 	slices := make([]string, 0, partCount)
+	var progressAcc *accounting.Account
 	for partIndex := int64(0); partIndex < partCount; partIndex++ {
 		offset := partIndex * blockSize
 		size := blockSize
@@ -148,7 +149,7 @@ func (f *Fs) uploadFromSource(ctx context.Context, source *reopenableSource, acc
 		if err != nil {
 			return err
 		}
-		if err = f.postFileSlice(ctx, task.Task, task.UploadAddress, newCID.String(), bytes.NewReader(chunk), acc, transfer, options); err != nil {
+		if err = f.postFileSlice(ctx, task.Task, task.UploadAddress, newCID.String(), bytes.NewReader(chunk), acc, transfer, &progressAcc, options); err != nil {
 			return err
 		}
 		slices = append(slices, newCID.String())
@@ -215,7 +216,7 @@ func defaultHashType(v int64) uint64 {
 	return 0x12
 }
 
-func (f *Fs) postFileSlice(ctx context.Context, taskID, uploadAddress, sliceCID string, section io.Reader, acc *accounting.Account, transfer *accounting.Transfer, options []fs.OpenOption) error {
+func (f *Fs) postFileSlice(ctx context.Context, taskID, uploadAddress, sliceCID string, section io.Reader, acc *accounting.Account, transfer *accounting.Transfer, progressAcc **accounting.Account, options []fs.OpenOption) error {
 	accessURL := strings.TrimRight(uploadAddress, "/") + "/" + taskID + "/" + sliceCID
 	checkReq, err := http.NewRequestWithContext(ctx, http.MethodGet, accessURL, nil)
 	if err != nil {
@@ -246,7 +247,15 @@ func (f *Fs) postFileSlice(ctx context.Context, taskID, uploadAddress, sliceCID 
 	if acc != nil {
 		body = readCloserWithReader{Reader: acc.WrapStream(body), Closer: body}
 	} else if transfer != nil {
-		body = transfer.Account(ctx, body)
+		if progressAcc != nil && *progressAcc != nil {
+			body = readCloserWithReader{Reader: (*progressAcc).WrapStream(body), Closer: body}
+		} else {
+			wrapped := transfer.Account(ctx, body)
+			if progressAcc != nil {
+				*progressAcc = wrapped
+			}
+			body = wrapped
+		}
 	}
 	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, accessURL, body)
 	if err != nil {

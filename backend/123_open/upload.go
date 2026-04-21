@@ -141,6 +141,7 @@ func (f *Fs) uploadFromSource(ctx context.Context, source *reopenableSource, acc
 	}
 
 	partCount := (src.Size() + chunkSize - 1) / chunkSize
+	var progressAcc *accounting.Account
 	for partIndex := int64(0); partIndex < partCount; partIndex++ {
 		offset := partIndex * chunkSize
 		size := chunkSize
@@ -162,7 +163,7 @@ func (f *Fs) uploadFromSource(ctx context.Context, source *reopenableSource, acc
 		if err != nil {
 			return err
 		}
-		err = f.uploadSlice(ctx, createResp.Data.Servers[0], createResp.Data.PreuploadID, partIndex+1, src.Remote(), rc, acc, transfer, size, sliceMD5, options)
+		err = f.uploadSlice(ctx, createResp.Data.Servers[0], createResp.Data.PreuploadID, partIndex+1, src.Remote(), rc, acc, transfer, &progressAcc, size, sliceMD5, options)
 		_ = rc.Close()
 		if err != nil {
 			return err
@@ -221,6 +222,7 @@ func (f *Fs) uploadFromTempFile(ctx context.Context, in io.Reader, acc *accounti
 	}
 	partCount := (src.Size() + chunkSize - 1) / chunkSize
 	buffer := make([]byte, chunkSize)
+	var progressAcc *accounting.Account
 	for partIndex := int64(0); partIndex < partCount; partIndex++ {
 		partSize := chunkSize
 		remaining := src.Size() - partIndex*chunkSize
@@ -233,7 +235,7 @@ func (f *Fs) uploadFromTempFile(ctx context.Context, in io.Reader, acc *accounti
 		}
 		chunk := buffer[:n]
 		sliceMD5 := md5.Sum(chunk)
-		if err = f.uploadSlice(ctx, createResp.Data.Servers[0], createResp.Data.PreuploadID, partIndex+1, src.Remote(), bytes.NewReader(chunk), acc, transfer, int64(len(chunk)), hex.EncodeToString(sliceMD5[:]), options); err != nil {
+		if err = f.uploadSlice(ctx, createResp.Data.Servers[0], createResp.Data.PreuploadID, partIndex+1, src.Remote(), bytes.NewReader(chunk), acc, transfer, &progressAcc, int64(len(chunk)), hex.EncodeToString(sliceMD5[:]), options); err != nil {
 			return err
 		}
 	}
@@ -279,7 +281,7 @@ func hashReadCloserMD5(rc io.Reader) (string, error) {
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
-func (f *Fs) uploadSlice(ctx context.Context, serverURL, preuploadID string, partNumber int64, remote string, section io.Reader, acc *accounting.Account, transfer *accounting.Transfer, chunkSize int64, sliceMD5 string, options []fs.OpenOption) error {
+func (f *Fs) uploadSlice(ctx context.Context, serverURL, preuploadID string, partNumber int64, remote string, section io.Reader, acc *accounting.Account, transfer *accounting.Transfer, progressAcc **accounting.Account, chunkSize int64, sliceMD5 string, options []fs.OpenOption) error {
 	token, err := f.getAccessToken(ctx, false)
 	if err != nil {
 		return err
@@ -298,7 +300,18 @@ func (f *Fs) uploadSlice(ctx context.Context, serverURL, preuploadID string, par
 			Closer: body,
 		}
 	} else if transfer != nil {
-		body = transfer.Account(ctx, body)
+		if progressAcc != nil && *progressAcc != nil {
+			body = readCloserWithReader{
+				Reader: (*progressAcc).WrapStream(body),
+				Closer: body,
+			}
+		} else {
+			wrapped := transfer.Account(ctx, body)
+			if progressAcc != nil {
+				*progressAcc = wrapped
+			}
+			body = wrapped
+		}
 	}
 	contentLength := chunkSize + overhead
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(serverURL, "/")+"/upload/v2/file/slice", body)

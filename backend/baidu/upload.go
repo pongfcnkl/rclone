@@ -313,6 +313,7 @@ func (f *Fs) upload(ctx context.Context, in io.Reader, src fs.ObjectInfo, option
 
 	uploadOnce := func() error {
 		pending := append([]int(nil), precreate.BlockList...)
+		var progressAcc *accounting.Account
 		for _, part := range pending {
 			offset := int64(part) * f.getSliceSize(src.Size())
 			size := f.getSliceSize(src.Size())
@@ -332,7 +333,12 @@ func (f *Fs) upload(ctx context.Context, in io.Reader, src fs.ObjectInfo, option
 			if acc != nil {
 				section = acc.WrapStream(section)
 			} else if transfer != nil {
-				section = transfer.Account(ctx, rc)
+				if progressAcc != nil {
+					section = progressAcc.WrapStream(section)
+				} else {
+					progressAcc = transfer.Account(ctx, rc)
+					section = progressAcc
+				}
 			}
 			if closer, ok := section.(io.Closer); ok {
 				closeReader = closer
