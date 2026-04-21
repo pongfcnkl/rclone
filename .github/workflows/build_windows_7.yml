@@ -1,0 +1,107 @@
+name: build_windows_7
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-7:
+    name: windows_7
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '>=1.23.0-rc.1'
+          check-latest: true
+
+      - name: Set environment variables
+        shell: bash
+        run: |
+          echo 'GOTAGS=cmount,noselfupdate' >> $GITHUB_ENV
+          echo 'BUILD_FLAGS=-include "^windows/"' >> $GITHUB_ENV
+          echo 'BUILD_ARGS=-buildmode exe' >> $GITHUB_ENV
+          echo 'CGO_ENABLED=0' >> $GITHUB_ENV
+
+      - name: Install Libraries on Linux
+        shell: bash
+        run: |
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          sudo chown root:$USER /etc/fuse.conf
+          sudo apt-get update
+          sudo apt-get install -y fuse3 libfuse-dev rpm pkg-config git-annex git-annex-remote-rclone nfs-common
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Print Go version and environment
+        shell: bash
+        run: |
+          printf "Using go at: $(which go)\n"
+          printf "Go version: $(go version)\n"
+          printf "\n\nGo environment:\n\n"
+          go env
+          printf "\n\nRclone environment:\n\n"
+          make vars
+          printf "\n\nSystem environment:\n\n"
+          env
+
+      - name: Build rclone
+        shell: bash
+        run: |
+          curl -L https://github.com/XTLS/go-win7/releases/download/patched-1.24.1/go-for-win7-linux-amd64.zip -o go-win7.zip
+          unzip -q go-win7.zip -d go-win7
+          chmod +x go-win7/bin/go
+          export PATH=$PWD/go-win7/bin:$PATH
+          echo "Building Windows 7 compatible binary..."
+          export GOOS=windows
+          export GOARCH=amd64
+          export CGO_ENABLED=1
+          export CC=/usr/bin/x86_64-w64-mingw32-gcc
+          go version
+          go build -o rclone.exe
+          mkdir -p build/windows_7
+          zip -9 build/windows_7/rclone-win7.zip rclone.exe
+
+      - name: Rclone version
+        shell: bash
+        run: |
+          ./rclone.exe version
+
+      - name: Run tests
+        shell: bash
+        run: |
+          echo "瀵瑰瀵?"
+
+      - name: Deploy built binaries
+        shell: bash
+        run: |
+          make release_dep_linux
+          make ci_beta
+        env:
+          RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
+        if: github.head_ref == '' && github.repository == 'pongfcnkl/rclone'
+
+      - name: Upload Release Assets
+        if: ${{ inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          files: |
+            build/windows_7/*
+            build/*.zip
+            build/*.deb
+            build/*.rpm
+            build/*.tar.gz
