@@ -75,10 +75,11 @@ jobs:
           mkdir -p build/windows_7
           zip -9 build/windows_7/rclone-win7.zip rclone.exe
 
-      - name: Rclone version
+      - name: Verify Windows binary
         shell: bash
         run: |
-          ./rclone.exe version
+          file rclone.exe
+          x86_64-w64-mingw32-objdump -f rclone.exe
 
       - name: Run tests
         shell: bash
