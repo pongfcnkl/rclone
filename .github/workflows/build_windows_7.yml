@@ -61,6 +61,7 @@ jobs:
       - name: Build rclone
         shell: bash
         run: |
+          VERSION="$(make version)"
           curl -L https://github.com/XTLS/go-win7/releases/download/patched-1.24.1/go-for-win7-linux-amd64.zip -o go-win7.zip
           unzip -q go-win7.zip -d go-win7
           chmod +x go-win7/bin/go
@@ -73,7 +74,7 @@ jobs:
           go version
           go build -o rclone.exe
           mkdir -p build/windows_7
-          zip -9 build/windows_7/rclone-win7.zip rclone.exe
+          zip -9 "build/windows_7/rclone-${VERSION}-windows_7-amd64.zip" rclone.exe
 
       - name: Verify Windows binary
         shell: bash
@@ -86,23 +87,10 @@ jobs:
         run: |
           echo "瀵瑰瀵?"
 
-      - name: Deploy built binaries
-        shell: bash
-        run: |
-          make release_dep_linux
-          make ci_beta
-        env:
-          RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
-        if: github.head_ref == '' && github.repository == 'pongfcnkl/rclone'
-
       - name: Upload Release Assets
         if: ${{ inputs.release_tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag }}
           files: |
-            build/windows_7/*
-            build/*.zip
-            build/*.deb
-            build/*.rpm
-            build/*.tar.gz
+            build/windows_7/*.zip
