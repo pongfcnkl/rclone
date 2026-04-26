@@ -140,6 +140,10 @@ func setupRootCommand(rootCmd *cobra.Command) {
 	rcflags.AddFlags(pflag.CommandLine)
 	logflags.AddFlags(pflag.CommandLine)
 
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		runTokenRefreshPreflight(cmd)
+	}
+
 	Root.Run = runRoot
 	Root.Flags().BoolVarP(&version, "version", "V", false, "Print the version number")
 
