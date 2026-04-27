@@ -125,6 +125,7 @@ type Fs struct {
 	name         string
 	originalName string
 	root         string
+	rootID       string
 	rootMissing  bool
 	opt          Options
 	features     *fs.Features
@@ -191,6 +192,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		name:         name,
 		originalName: originalName,
 		root:         root,
+		rootID:       opt.RootFolderID,
 		opt:          *opt,
 		httpClient:   fshttp.NewClient(ctx),
 		service:      service,
@@ -215,6 +217,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		return f, nil
 	}
 	f.root = actualRoot
+	f.rootID = item.id
 	if !item.isDir {
 		newRoot := path.Dir(actualRoot)
 		if newRoot == "." {
@@ -222,6 +225,15 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 		tempF := *f
 		tempF.root = newRoot
+		if newRoot == "" {
+			tempF.rootID = tempF.opt.RootFolderID
+		} else {
+			parent, err := f.findItemByRemote(ctx, newRoot)
+			if err != nil {
+				return nil, err
+			}
+			tempF.rootID = parent.id
+		}
 		return &tempF, fs.ErrorIsFile
 	}
 	return f, nil
@@ -410,7 +422,7 @@ func (f *Fs) readBackObject(ctx context.Context, src fs.ObjectInfo) (fs.Object, 
 func (f *Fs) rootDirObject() *Object {
 	return &Object{
 		fs:      f,
-		id:      f.opt.RootFolderID,
+		id:      f.rootID,
 		remote:  "",
 		modTime: time.Now(),
 		isDir:   true,
@@ -447,7 +459,7 @@ func (f *Fs) findItemByRemote(ctx context.Context, remote string) (*Object, erro
 		return f.rootDirObject(), nil
 	}
 	parts := strings.Split(remote, "/")
-	parentID := f.opt.RootFolderID
+	parentID := f.rootID
 	var out *Object
 	for _, part := range parts {
 		items, err := f.listByID(ctx, parentID)
@@ -540,6 +552,7 @@ func (f *Fs) ensureDir(ctx context.Context, dir string) error {
 			parent = item
 		}
 		f.rootMissing = false
+		f.rootID = parent.id
 	}
 	dir = strings.Trim(dir, "/")
 	if dir == "" {
