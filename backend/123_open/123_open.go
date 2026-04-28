@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rclone/rclone/fs"
@@ -117,6 +118,7 @@ type Fs struct {
 	httpClient   *http.Client
 	uid          uint64
 	tm           tokenManager
+	dirMu        sync.Mutex
 }
 
 type Object struct {
@@ -512,9 +514,13 @@ func (f *Fs) findDeepestExistingAbsoluteRemote(ctx context.Context, remote strin
 }
 
 func (f *Fs) ensureDir(ctx context.Context, dir string) error {
+	f.dirMu.Lock()
+	defer f.dirMu.Unlock()
+
 	if f.rootMissing {
 		parts := strings.Split(strings.Trim(f.root, "/"), "/")
 		current := ""
+		parentID := int64(0)
 		for _, part := range parts {
 			if part == "" {
 				continue
@@ -529,23 +535,18 @@ func (f *Fs) ensureDir(ctx context.Context, dir string) error {
 					return fs.ErrorIsFile
 				}
 				current = next
+				parentID = item.FileID
 				continue
 			}
 			if !errors.Is(err, fs.ErrorObjectNotFound) {
 				return err
 			}
-			parentID := int64(0)
-			if current != "" {
-				parent, err := f.findItemByAbsoluteRemote(ctx, current)
-				if err != nil {
-					return err
-				}
-				parentID = parent.FileID
-			}
-			if err = f.apiMkdir(ctx, parentID, part); err != nil {
+			created, err := f.ensureChildDir(ctx, parentID, part)
+			if err != nil {
 				return err
 			}
 			current = next
+			parentID = created.FileID
 		}
 		f.rootMissing = false
 	}
@@ -555,6 +556,14 @@ func (f *Fs) ensureDir(ctx context.Context, dir string) error {
 	}
 	parts := strings.Split(dir, "/")
 	current := ""
+	parentID := int64(0)
+	if f.root != "" {
+		rootItem, err := f.findDirByRemote(ctx, "")
+		if err != nil {
+			return err
+		}
+		parentID = rootItem.FileID
+	}
 	for _, part := range parts {
 		next := part
 		if current != "" {
@@ -566,31 +575,67 @@ func (f *Fs) ensureDir(ctx context.Context, dir string) error {
 				return fs.ErrorIsFile
 			}
 			current = next
+			parentID = item.FileID
 			continue
 		}
 		if !errors.Is(err, fs.ErrorObjectNotFound) {
 			return err
 		}
-		parentID := int64(0)
-		if current != "" {
-			parent, err := f.findDirByRemote(ctx, current)
-			if err != nil {
-				return err
-			}
-			parentID = parent.FileID
-		} else if f.root != "" {
-			parent, err := f.findDirByRemote(ctx, "")
-			if err != nil {
-				return err
-			}
-			parentID = parent.FileID
-		}
-		if err = f.apiMkdir(ctx, parentID, f.opt.Enc.FromStandardName(part)); err != nil {
+		created, err := f.ensureChildDir(ctx, parentID, f.opt.Enc.FromStandardName(part))
+		if err != nil {
 			return err
 		}
 		current = next
+		parentID = created.FileID
 	}
 	return nil
+}
+
+func (f *Fs) ensureChildDir(ctx context.Context, parentID int64, dirName string) (File, error) {
+	items, err := f.apiListFiles(ctx, parentID)
+	if err != nil {
+		return File{}, err
+	}
+	for _, item := range items {
+		if item.Type == 1 && item.FileName == dirName {
+			return item, nil
+		}
+	}
+
+	err = f.apiMkdir(ctx, parentID, dirName)
+	if err != nil && !isDuplicateDirError(err) {
+		return File{}, err
+	}
+
+	for attempt := 0; attempt < 6; attempt++ {
+		items, err = f.apiListFiles(ctx, parentID)
+		if err != nil {
+			return File{}, err
+		}
+		for _, item := range items {
+			if item.Type == 1 && item.FileName == dirName {
+				return item, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return File{}, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 150 * time.Millisecond):
+		}
+	}
+
+	if err != nil {
+		return File{}, err
+	}
+	return File{}, fs.ErrorDirNotFound
+}
+
+func isDuplicateDirError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "同名文件") || strings.Contains(strings.ToLower(msg), "already exists")
 }
 
 func (o *Object) Fs() fs.Info    { return o.fs }
