@@ -382,7 +382,7 @@ x-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit
 		return "", err
 	}
 	u := fmt.Sprintf("https://%s.%s/%s", pre.Data.Bucket, normalizeUploadHost(pre.Data.UploadURL), pre.Data.ObjKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, struct{ io.Reader }{body})
 	if err != nil {
 		return "", err
 	}
