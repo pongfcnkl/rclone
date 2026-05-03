@@ -14,6 +14,7 @@ import (
 	_ "github.com/rclone/rclone/backend/azurefiles"
 	_ "github.com/rclone/rclone/backend/b2"
 	_ "github.com/rclone/rclone/backend/baidu"
+	_ "github.com/rclone/rclone/backend/baidu_photo"
 	_ "github.com/rclone/rclone/backend/box"
 	_ "github.com/rclone/rclone/backend/cache"
 	_ "github.com/rclone/rclone/backend/chunker"
