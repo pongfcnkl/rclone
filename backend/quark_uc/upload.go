@@ -468,14 +468,39 @@ x-oss-user-agent:aliyun-sdk-js/6.6.1 Chrome 98.0.4758.80 on Windows 10 64-bit
 }
 
 func (f *Fs) upFinish(ctx context.Context, pre *upPreResp) error {
-	_, err := f.call(ctx, http.MethodPost, "/file/upload/finish", nil, map[string]any{
-		"obj_key": pre.Data.ObjKey,
-		"task_id": pre.Data.TaskID,
-	}, nil, nil)
-	if err == nil {
-		time.Sleep(time.Second)
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		_, err := f.call(ctx, http.MethodPost, "/file/upload/finish", nil, map[string]any{
+			"obj_key": pre.Data.ObjKey,
+			"task_id": pre.Data.TaskID,
+		}, nil, nil)
+		if err == nil {
+			time.Sleep(time.Second)
+			return nil
+		}
+		if !isSameNameDownloadingError(err) {
+			return err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
 	}
-	return err
+	return lastErr
+}
+
+func isSameNameDownloadingError(err error) bool {
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.resp.Code == 23008 {
+		return true
+	}
+	msg := strings.ToLower(apiErr.resp.Message)
+	return strings.Contains(msg, "doloading") && strings.Contains(apiErr.resp.Message, "同名冲突")
 }
 
 func (f *Fs) downloadLink(ctx context.Context, obj *Object) (string, http.Header, error) {

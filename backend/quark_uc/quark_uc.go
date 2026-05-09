@@ -155,6 +155,26 @@ type fileItem struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
+type apiError struct {
+	statusCode int
+	resp       baseResp
+	body       string
+}
+
+func (e *apiError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.statusCode < 200 || e.statusCode > 299 {
+		return fmt.Sprintf("quark_uc: http %d: %s", e.statusCode, e.body)
+	}
+	msg := strings.TrimSpace(e.resp.Message)
+	if msg == "" {
+		msg = e.body
+	}
+	return msg
+}
+
 var (
 	_ fs.Fs             = (*Fs)(nil)
 	_ fs.Abouter        = (*Fs)(nil)
@@ -719,14 +739,10 @@ func (f *Fs) call(ctx context.Context, method, pathname string, query map[string
 	var apiErr baseResp
 	_ = json.Unmarshal(data, &apiErr)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("quark_uc: http %d: %s", resp.StatusCode, string(data))
+		return nil, &apiError{statusCode: resp.StatusCode, resp: apiErr, body: string(data)}
 	}
 	if apiErr.Status >= 400 || apiErr.Code != 0 {
-		msg := strings.TrimSpace(apiErr.Message)
-		if msg == "" {
-			msg = string(data)
-		}
-		return nil, errors.New(msg)
+		return nil, &apiError{statusCode: resp.StatusCode, resp: apiErr, body: string(data)}
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
