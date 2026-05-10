@@ -175,6 +175,17 @@ func (e *apiError) Error() string {
 	return msg
 }
 
+func isSameNameConflictError(err error) bool {
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.resp.Code == 23008 {
+		return true
+	}
+	return strings.Contains(strings.ToLower(apiErr.resp.Message), "doloading")
+}
+
 var (
 	_ fs.Fs             = (*Fs)(nil)
 	_ fs.Abouter        = (*Fs)(nil)
@@ -561,10 +572,7 @@ func (f *Fs) ensureDir(ctx context.Context, dir string) error {
 			if !errors.Is(err, fs.ErrorObjectNotFound) {
 				return err
 			}
-			if err := f.mkdirByID(ctx, parent.id, f.opt.Enc.FromStandardName(part)); err != nil {
-				return err
-			}
-			item, err = f.findItemByRemote(ctx, next)
+			item, err = f.mkdirAndWait(ctx, parent.id, next, f.opt.Enc.FromStandardName(part))
 			if err != nil {
 				return err
 			}
@@ -598,10 +606,7 @@ func (f *Fs) ensureDir(ctx context.Context, dir string) error {
 		if !errors.Is(err, fs.ErrorObjectNotFound) {
 			return err
 		}
-		if err := f.mkdirByID(ctx, parent.id, f.opt.Enc.FromStandardName(part)); err != nil {
-			return err
-		}
-		item, err = f.findItemByRemote(ctx, next)
+		item, err = f.mkdirAndWait(ctx, parent.id, next, f.opt.Enc.FromStandardName(part))
 		if err != nil {
 			return err
 		}
@@ -609,6 +614,38 @@ func (f *Fs) ensureDir(ctx context.Context, dir string) error {
 		parent = item
 	}
 	return nil
+}
+
+func (f *Fs) mkdirAndWait(ctx context.Context, parentID, remote, name string) (*Object, error) {
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		err := f.mkdirByID(ctx, parentID, name)
+		if err != nil && !isSameNameConflictError(err) {
+			return nil, err
+		}
+		if err != nil {
+			lastErr = err
+		}
+		item, findErr := f.findItemByRemote(ctx, remote)
+		if findErr == nil {
+			if !item.isDir {
+				return nil, fs.ErrorIsFile
+			}
+			return item, nil
+		}
+		if !errors.Is(findErr, fs.ErrorObjectNotFound) {
+			return nil, findErr
+		}
+		if lastErr == nil {
+			lastErr = findErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * time.Second):
+		}
+	}
+	return nil, lastErr
 }
 
 func (f *Fs) listByID(ctx context.Context, parentID string) ([]fileItem, error) {
