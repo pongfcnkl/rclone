@@ -419,12 +419,10 @@ func (f *Fs) ensureDir(ctx context.Context, dir string) error {
 }
 
 func (f *Fs) init(ctx context.Context) error {
-	if f.opt.RefreshToken != "" {
+	if f.opt.AccessToken == "" {
 		if err := f.refreshToken(ctx); err != nil {
 			return err
 		}
-	} else if f.opt.AccessToken == "" {
-		return errors.New("baidu: either refresh_token or access_token is required")
 	}
 	info, err := f.apiUserInfo(ctx)
 	if err != nil {

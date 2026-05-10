@@ -622,6 +622,15 @@ func (f *Fs) login(ctx context.Context) error {
 	return nil
 }
 
+func (f *Fs) forceLogin(ctx context.Context) error {
+	f.tokenMu.Lock()
+	f.accessToken = ""
+	f.tokenExpiry = time.Time{}
+	f.tokenRefreshLead = 0
+	f.tokenMu.Unlock()
+	return f.login(ctx)
+}
+
 // setupLoginEnvironment parses cookies and sets up HTTP clients
 func (f *Fs) setupLoginEnvironment(ctx context.Context) error {
 	// Parse cookie
@@ -813,7 +822,12 @@ func (f *Fs) refreshTokenIfNecessary(ctx context.Context, refreshTokenExpired bo
 
 	if shouldPerformFullLogin(f, refreshTokenExpired) {
 		f.tokenMu.Unlock()
-		err := f.login(ctx)
+		var err error
+		if refreshTokenExpired {
+			err = f.forceLogin(ctx)
+		} else {
+			err = f.login(ctx)
+		}
 		if err != nil {
 			return err
 		}
@@ -946,17 +960,7 @@ func (f *Fs) performTokenRefresh(ctx context.Context, refreshToken string) (*api
 
 		fs.Errorf(f, "Refresh token response empty, attempting re-login.")
 
-		// Re-lock before checking token again to avoid race condition
-		f.tokenMu.Lock()
-		// Check if another thread has already refreshed the token
-		if f.accessToken != "" && time.Now().Before(f.tokenExpiry) {
-			fs.Debugf(f, "Token was refreshed by another thread while waiting")
-			f.tokenMu.Unlock()
-			return nil, nil
-		}
-		f.tokenMu.Unlock()
-
-		loginErr := f.login(ctx)
+		loginErr := f.forceLogin(ctx)
 		if loginErr != nil {
 			return nil, fmt.Errorf("re-login failed after empty refresh response: %w", loginErr)
 		}
@@ -1033,7 +1037,7 @@ func handleRefreshError(f *Fs, ctx context.Context, err error) (*api.RefreshToke
 	if errors.As(err, &tokenErr) && tokenErr.IsRefreshTokenExpired ||
 		strings.Contains(err.Error(), "refresh token expired") {
 		fs.Debugf(f, "Refresh token seems expired, attempting full re-login.")
-		loginErr := f.login(ctx) // login handles its own locking
+		loginErr := f.forceLogin(ctx) // login handles its own locking
 		if loginErr != nil {
 			return nil, fmt.Errorf("re-login failed after refresh token expired: %w", loginErr)
 		}
@@ -1676,7 +1680,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		if err != nil {
 			fs.Debugf(f, "Token refresh failed, attempting full login: %v", err)
 			// If refresh fails, try full login
-			err = f.login(ctx)
+			err = f.forceLogin(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("login failed after token refresh failure: %w", err)
 			}
