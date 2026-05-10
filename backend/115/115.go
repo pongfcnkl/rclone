@@ -70,6 +70,9 @@ const (
 	defaultTokenRefreshWindow = 10 * time.Minute // Refresh token 10 minutes before expiry when lifetime permits
 	minTokenRefreshWindow     = 30 * time.Second // Clamp refresh lead for very short-lived tokens
 	pkceVerifierLength        = 64               // Length for PKCE code verifier
+	refreshTooFrequentCode    = 40140117
+	refreshTooFrequentDelay   = 5 * time.Second
+	refreshTooFrequentRetries = 3
 )
 
 // TraditionalRequest is the standard 115.com request structure for traditional API
@@ -937,6 +940,23 @@ func isTokenStillValid(f *Fs) bool {
 	return !f.shouldRefreshTokens()
 }
 
+func (f *Fs) accessTokenUsableNow() bool {
+	f.tokenMu.Lock()
+	defer f.tokenMu.Unlock()
+	return f.accessToken != "" && time.Now().Before(f.tokenExpiry)
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // performTokenRefresh handles the actual API call to refresh the token
 func (f *Fs) performTokenRefresh(ctx context.Context, refreshToken string) (*api.RefreshTokenResp, error) {
 	// Ensure client exists
@@ -944,31 +964,40 @@ func (f *Fs) performTokenRefresh(ctx context.Context, refreshToken string) (*api
 		return nil, err
 	}
 
-	// Set up and make the refresh request
-	refreshResp, err := f.callRefreshTokenAPI(ctx, refreshToken)
-	if err != nil {
-		return handleRefreshError(f, ctx, err)
-	}
-
-	// Validate the response
-	if refreshResp.Data == nil || refreshResp.Data.AccessToken == "" {
-		// Log detailed information about the empty response
-		fs.Errorf(f, "Refresh token response empty or invalid. Full response: %#v", refreshResp)
-		// Log OpenAPI base information (state, code, message)
-		fs.Errorf(f, "Response state: %v, code: %d, message: %q",
-			refreshResp.State, refreshResp.Code, refreshResp.Message)
-
-		fs.Errorf(f, "Refresh token response empty, attempting re-login.")
-
-		loginErr := f.forceLogin(ctx)
-		if loginErr != nil {
-			return nil, fmt.Errorf("re-login failed after empty refresh response: %w", loginErr)
+	for attempt := 0; ; attempt++ {
+		// Set up and make the refresh request
+		refreshResp, err := f.callRefreshTokenAPI(ctx, refreshToken)
+		if err != nil {
+			return handleRefreshError(f, ctx, err)
 		}
-		fs.Debugf(f, "Re-login successful after empty refresh response.")
-		return nil, nil // Re-login successful, no need to update tokens
-	}
 
-	return refreshResp, nil
+		if !refreshResp.State {
+			if refreshResp.ErrCode() == refreshTooFrequentCode {
+				if f.accessTokenUsableNow() {
+					fs.Debugf(f, "Token refresh rate limited by 115; continuing with current access token until it expires")
+					return nil, nil
+				}
+				if attempt < refreshTooFrequentRetries {
+					fs.Debugf(f, "Token refresh rate limited by 115, retrying in %v (attempt %d/%d)", refreshTooFrequentDelay, attempt+1, refreshTooFrequentRetries)
+					if err := sleepWithContext(ctx, refreshTooFrequentDelay); err != nil {
+						return nil, err
+					}
+					continue
+				}
+			}
+			return handleRefreshError(f, ctx, refreshResp.Err())
+		}
+
+		// Validate the response
+		if refreshResp.Data == nil || refreshResp.Data.AccessToken == "" {
+			fs.Errorf(f, "Refresh token response empty or invalid. Full response: %#v", refreshResp)
+			fs.Errorf(f, "Response state: %v, code: %d, message: %q",
+				refreshResp.State, refreshResp.Code, refreshResp.Message)
+			return nil, errors.New("refresh token response missing access token")
+		}
+
+		return refreshResp, nil
+	}
 }
 
 // ensureOpenAPIClient ensures the OpenAPI client is initialized

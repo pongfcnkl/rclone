@@ -224,11 +224,10 @@ func (b *OpenAPIBase) Err() error {
 	}
 
 	switch code {
-	// Codes that require re-login
 	case 40140116: // refresh_token invalid (authorization revoked)
 		return NewTokenError(out, true)
 	case 40140117: // access_token refreshed too frequently
-		return NewTokenError(out, true)
+		return NewTokenError(out, false)
 	case 40140119: // refresh_token expired
 		return NewTokenError(out, true)
 	case 40140120: // refresh_token verification failed (anti-tampering)
