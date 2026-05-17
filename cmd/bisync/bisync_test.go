@@ -418,7 +418,7 @@ func (b *bisyncTest) runTestCase(ctx context.Context, t *testing.T, testCase str
 			newPath = b.tempDir + "/" + label + "/" + "test_" + b.testCase + "-" + random.String(8)
 			newFs, err := cache.Get(ctx, newPath)
 			require.NoError(b.t, err)
-			require.NoError(b.t, sync.CopyDir(ctxNoDsStore, newFs, oldFs, true), "setting up "+label)
+			require.NoError(b.t, sync.CopyDir(ctxNoDsStore, newFs, oldFs, true, nil), "setting up "+label)
 		}
 		return newPath
 	}
@@ -453,10 +453,10 @@ func (b *bisyncTest) runTestCase(ctx context.Context, t *testing.T, testCase str
 	}
 	fs.Logf(nil, "checking initFs %s", initFs)
 	fstest.CheckListingWithPrecision(b.t, initFs, items, dirs, initFs.Precision())
-	checkError(b.t, sync.CopyDir(ctxNoDsStore, b.fs1, initFs, true), "setting up path1")
+	checkError(b.t, sync.CopyDir(ctxNoDsStore, b.fs1, initFs, true, nil), "setting up path1")
 	fs.Logf(nil, "checking Path1 %s", b.fs1)
 	fstest.CheckListingWithPrecision(b.t, b.fs1, items, dirs, b.fs1.Precision())
-	checkError(b.t, sync.CopyDir(ctxNoDsStore, b.fs2, initFs, true), "setting up path2")
+	checkError(b.t, sync.CopyDir(ctxNoDsStore, b.fs2, initFs, true, nil), "setting up path2")
 	fs.Logf(nil, "checking path2 %s", b.fs2)
 	fstest.CheckListingWithPrecision(b.t, b.fs2, items, dirs, b.fs2.Precision())
 
@@ -726,7 +726,7 @@ func (b *bisyncTest) runTestStep(ctx context.Context, line string) (err error) {
 		switch args[0] {
 		case "copy-dir":
 			ctxNoDsStore, _ := ctxNoDsStore(ctx, b.t)
-			err = sync.CopyDir(ctxNoDsStore, fdst, fsrc, true)
+			err = sync.CopyDir(ctxNoDsStore, fdst, fsrc, true, nil)
 		case "sync-dir":
 			ctxNoDsStore, _ := ctxNoDsStore(ctx, b.t)
 			err = sync.Sync(ctxNoDsStore, fdst, fsrc, true)

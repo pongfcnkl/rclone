@@ -605,7 +605,7 @@ func (b *bisyncRun) modifyListing(ctx context.Context, src fs.Fs, dst fs.Fs, res
 					fs.Debugf(srcOldName, "error adding file to recheck filter: %v", err)
 				}
 			}
-			if srcNewName != "" { // if it was renamed and not deleted
+			if srcNewName != "" && new != nil { // if it was renamed and not deleted
 				srcList.put(srcNewName, new.size, new.time, new.hash, new.id, new.flags)
 				dstList.put(srcNewName, new.size, new.time, new.hash, new.id, new.flags)
 			}

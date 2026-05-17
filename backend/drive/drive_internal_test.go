@@ -605,16 +605,16 @@ func (f *Fs) InternalTestAgeQuery(t *testing.T) {
 	// validate sync/copy
 	const timeQuery = "(modifiedTime >= '"
 
-	assert.NoError(t, sync.CopyDir(defCtx, subFs, tempFs1, false))
+	assert.NoError(t, sync.CopyDir(defCtx, subFs, tempFs1, false, nil))
 	assert.NotContains(t, subFs.lastQuery, timeQuery)
 
-	assert.NoError(t, sync.CopyDir(fltCtx, subFs, tempFs1, false))
+	assert.NoError(t, sync.CopyDir(fltCtx, subFs, tempFs1, false, nil))
 	assert.Contains(t, subFs.lastQuery, timeQuery)
 
-	assert.NoError(t, sync.CopyDir(fltCtx, tempFs2, subFs, false))
+	assert.NoError(t, sync.CopyDir(fltCtx, tempFs2, subFs, false, nil))
 	assert.Contains(t, subFs.lastQuery, timeQuery)
 
-	assert.NoError(t, sync.CopyDir(defCtx, tempFs2, subFs, false))
+	assert.NoError(t, sync.CopyDir(defCtx, tempFs2, subFs, false, nil))
 	assert.NotContains(t, subFs.lastQuery, timeQuery)
 
 	// validate list/walk

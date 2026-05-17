@@ -291,7 +291,7 @@ func (b *bisyncRun) retryFastCopy(ctx context.Context, fsrc, fdst fs.Fs, files b
 func (b *bisyncRun) resyncDir(ctx context.Context, fsrc, fdst fs.Fs) ([]Results, error) {
 	ctx = b.preCopy(ctx)
 
-	err := sync.CopyDir(context.Background(), fdst, fsrc, false, nil)
+	err := sync.CopyDir(ctx, fdst, fsrc, b.opt.CreateEmptySrcDirs, nil)
 	prettyprint(logger, "logger", fs.LogLevelDebug)
 
 	getResults := ReadResults(logger.JSON)

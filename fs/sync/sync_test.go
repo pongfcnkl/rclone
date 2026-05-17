@@ -54,7 +54,7 @@ func TestCopyWithDryRun(t *testing.T) {
 
 	ci.DryRun = true
 	ctx = predictDstFromLogger(ctx)
-	err := CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err := CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t) // error expected here because dry-run
 	require.NoError(t, err)
 
@@ -74,7 +74,7 @@ func TestCopy(t *testing.T) {
 	r.Mkdir(ctx, r.Fremote)
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err = CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -141,7 +141,7 @@ func testCopyMetadata(t *testing.T, createEmptySrcDirs bool) {
 	}
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, r.Fremote, r.Flocal, createEmptySrcDirs)
+	err = CopyDir(ctx, r.Fremote, r.Flocal, createEmptySrcDirs, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -191,7 +191,7 @@ func TestCopyMissingDirectory(t *testing.T) {
 	}
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, r.Fremote, nonExistingFs, false)
+	err = CopyDir(ctx, r.Fremote, nonExistingFs, false, nil)
 	require.Error(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 }
@@ -207,7 +207,7 @@ func TestCopyNoTraverse(t *testing.T) {
 	file1 := r.WriteFile("sub dir/hello world", "hello world", t1)
 
 	ctx = predictDstFromLogger(ctx)
-	err := CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err := CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -226,7 +226,7 @@ func TestCopyCheckFirst(t *testing.T) {
 	file1 := r.WriteFile("sub dir/hello world", "hello world", t1)
 
 	ctx = predictDstFromLogger(ctx)
-	err := CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err := CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -266,7 +266,7 @@ func TestCopyWithDepth(t *testing.T) {
 	ci.MaxDepth = 1
 
 	ctx = predictDstFromLogger(ctx)
-	err := CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err := CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -294,7 +294,7 @@ func testCopyWithFilesFrom(t *testing.T, noTraverse bool) {
 	ci.NoTraverse = noTraverse
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err = CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -321,7 +321,7 @@ func TestCopyEmptyDirectories(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, r.Fremote, r.Flocal, true)
+	err = CopyDir(ctx, r.Fremote, r.Flocal, true, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -352,7 +352,7 @@ func TestCopyNoEmptyDirectories(t *testing.T) {
 	require.NoError(t, err)
 	r.Mkdir(ctx, r.Fremote)
 
-	err = CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err = CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 
 	r.CheckRemoteListing(
@@ -590,7 +590,7 @@ func TestServerSideCopy(t *testing.T) {
 	t.Logf("Server side copy (if possible) %v -> %v", r.Fremote, FremoteCopy)
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
+	err = CopyDir(ctx, FremoteCopy, r.Fremote, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -607,7 +607,7 @@ func TestCopyOverSelf(t *testing.T) {
 	r.CheckLocalItems(t, file2)
 
 	ctx = predictDstFromLogger(ctx)
-	err := CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err := CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	r.CheckRemoteItems(t, file2)
@@ -626,7 +626,7 @@ func TestServerSideCopyOverSelf(t *testing.T) {
 	t.Logf("Server side copy (if possible) %v -> %v", r.Fremote, FremoteCopy)
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
+	err = CopyDir(ctx, FremoteCopy, r.Fremote, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file1)
@@ -635,7 +635,7 @@ func TestServerSideCopyOverSelf(t *testing.T) {
 	r.CheckRemoteItems(t, file2)
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
+	err = CopyDir(ctx, FremoteCopy, r.Fremote, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file2)
@@ -671,7 +671,7 @@ func TestServerSideMoveOverSelf(t *testing.T) {
 	t.Logf("Server side copy (if possible) %v -> %v", r.Fremote, FremoteCopy)
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, FremoteCopy, r.Fremote, false)
+	err = CopyDir(ctx, FremoteCopy, r.Fremote, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 	fstest.CheckItems(t, FremoteCopy, file1)
@@ -712,7 +712,7 @@ func TestCopyAfterDelete(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx = predictDstFromLogger(ctx)
-	err = CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err = CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -728,7 +728,7 @@ func TestCopyRedownload(t *testing.T) {
 	r.CheckRemoteItems(t, file1)
 
 	ctx = predictDstFromLogger(ctx)
-	err := CopyDir(ctx, r.Flocal, r.Fremote, false)
+	err := CopyDir(ctx, r.Flocal, r.Fremote, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -1341,7 +1341,7 @@ func TestCopyDeleteBefore(t *testing.T) {
 
 	accounting.GlobalStats().ResetCounters()
 	ctx = predictDstFromLogger(ctx)
-	err := CopyDir(ctx, r.Fremote, r.Flocal, false)
+	err := CopyDir(ctx, r.Fremote, r.Flocal, false, nil)
 	require.NoError(t, err)
 	testLoggerVsLsf(ctx, r.Fremote, operations.GetLoggerOpt(ctx).JSON, t)
 
@@ -2789,7 +2789,7 @@ func testNothingToTransfer(t *testing.T, copyEmptySrcDirs bool) {
 	accounting.GlobalStats().ResetCounters()
 	ctx = predictDstFromLogger(ctx)
 	output := bilib.CaptureOutput(func() {
-		err = CopyDir(ctx, r.Fremote, r.Flocal, copyEmptySrcDirs)
+		err = CopyDir(ctx, r.Fremote, r.Flocal, copyEmptySrcDirs, nil)
 		require.NoError(t, err)
 	})
 	require.NotNil(t, output)
@@ -2811,7 +2811,7 @@ func testNothingToTransfer(t *testing.T, copyEmptySrcDirs bool) {
 	accounting.GlobalStats().ResetCounters()
 	ctx = predictDstFromLogger(ctx)
 	output = bilib.CaptureOutput(func() {
-		err = CopyDir(ctx, r.Fremote, r.Flocal, copyEmptySrcDirs)
+		err = CopyDir(ctx, r.Fremote, r.Flocal, copyEmptySrcDirs, nil)
 		require.NoError(t, err)
 	})
 	require.NotNil(t, output)
@@ -2848,7 +2848,7 @@ func testNothingToTransfer(t *testing.T, copyEmptySrcDirs bool) {
 	accounting.GlobalStats().ResetCounters()
 	ctx = predictDstFromLogger(ctx)
 	output = bilib.CaptureOutput(func() {
-		err = CopyDir(ctx, r.Fremote, r.Flocal, copyEmptySrcDirs)
+		err = CopyDir(ctx, r.Fremote, r.Flocal, copyEmptySrcDirs, nil)
 		require.NoError(t, err)
 	})
 	require.NotNil(t, output)

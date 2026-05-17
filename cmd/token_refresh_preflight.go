@@ -10,7 +10,6 @@ import (
 )
 
 var tokenRefreshPreflightTypes = map[string]struct{}{
-	"115":             {},
 	"123_open":        {},
 	"1guangyapan":     {},
 	"aliyunpds":       {},
@@ -76,8 +75,6 @@ func isTokenRefreshPreflightRemote(remote configfile.Remote) bool {
 		return true
 	}
 	switch remote.Type {
-	case "115":
-		return hasRemoteConfigValue(remote.Name, "token") || hasRemoteConfigValue(remote.Name, "cookie")
 	case "123_open":
 		return hasRemoteConfigValue(remote.Name, "access_token") || hasRemoteConfigValue(remote.Name, "refresh_token")
 	case "1guangyapan":
