@@ -5,6 +5,7 @@ package local
 import (
 	"io"
 	"os"
+	"sync"
 
 	"github.com/rclone/rclone/fs"
 	"golang.org/x/sys/unix"
@@ -127,7 +128,9 @@ func (f *fadvise) wait() {
 
 type fadviseReadCloser struct {
 	*fadvise
-	inner io.ReadCloser
+	inner     io.ReadCloser
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // newFadviseReadCloser wraps os.File so that reading from that file would
@@ -136,7 +139,7 @@ type fadviseReadCloser struct {
 // make sequential reads faster.
 // See also fadvise.
 func newFadviseReadCloser(o *Object, f *os.File, offset, limit int64) io.ReadCloser {
-	r := fadviseReadCloser{
+	r := &fadviseReadCloser{
 		fadvise: newFadvise(o, int(f.Fd()), offset),
 		inner:   f,
 	}
@@ -152,14 +155,17 @@ func newFadviseReadCloser(o *Object, f *os.File, offset, limit int64) io.ReadClo
 	return r
 }
 
-func (f fadviseReadCloser) Read(p []byte) (n int, err error) {
+func (f *fadviseReadCloser) Read(p []byte) (n int, err error) {
 	n, err = f.inner.Read(p)
 	f.next(n)
 	return
 }
 
-func (f fadviseReadCloser) Close() error {
-	f.freePages()
-	f.wait()
-	return f.inner.Close()
+func (f *fadviseReadCloser) Close() error {
+	f.closeOnce.Do(func() {
+		f.freePages()
+		f.wait()
+		f.closeErr = f.inner.Close()
+	})
+	return f.closeErr
 }
