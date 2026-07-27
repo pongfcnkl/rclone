@@ -248,27 +248,11 @@ func (f *Fs) multipartUploadFromSource(ctx context.Context, client *oss.Client, 
 		if remaining := src.Size() - offset; remaining < curPartSize {
 			curPartSize = remaining
 		}
-		rc, err := source.OpenRange(ctx, offset, curPartSize)
+		part, err := f.uploadPartFromSource(ctx, client, token, uploadInfo, source, partNumber, offset, curPartSize, acc, transfer, &progressAcc, src)
 		if err != nil {
 			return abortMultipart(ctx, client, token, uploadInfo, err)
 		}
-		body := wrapUploadReader(ctx, rc, acc, transfer, &progressAcc)
-		req := &oss.UploadPartRequest{
-			Bucket:     oss.Ptr(token.BucketName),
-			Key:        oss.Ptr(token.ObjectPath),
-			UploadId:   uploadInfo.UploadId,
-			PartNumber: partNumber,
-			Body:       body,
-		}
-		res, err := client.UploadPart(ctx, req)
-		_ = body.Close()
-		if err != nil {
-			return abortMultipart(ctx, client, token, uploadInfo, err)
-		}
-		completed = append(completed, oss.UploadPart{
-			PartNumber: partNumber,
-			ETag:       res.ETag,
-		})
+		completed = append(completed, part)
 	}
 	_, err = client.CompleteMultipartUpload(ctx, &oss.CompleteMultipartUploadRequest{
 		Bucket:   oss.Ptr(token.BucketName),
@@ -279,6 +263,72 @@ func (f *Fs) multipartUploadFromSource(ctx context.Context, client *oss.Client, 
 		},
 	})
 	return err
+}
+
+func (f *Fs) uploadPartFromSource(ctx context.Context, client *oss.Client, token *uploadTokenData, uploadInfo *oss.InitiateMultipartUploadResult, source *reopenableSource, partNumber int32, offset, size int64, acc *accounting.Account, transfer *accounting.Transfer, progressAcc **accounting.Account, src fs.ObjectInfo) (oss.UploadPart, error) {
+	maxRetries := fs.GetConfig(ctx).LowLevelRetries
+	var err error
+	for try := 0; try <= maxRetries; try++ {
+		var rc io.ReadCloser
+		rc, err = source.OpenRange(ctx, offset, size)
+		if err == nil {
+			body := wrapUploadReader(ctx, rc, acc, transfer, progressAcc)
+			var res *oss.UploadPartResult
+			res, err = client.UploadPart(ctx, &oss.UploadPartRequest{
+				Bucket:     oss.Ptr(token.BucketName),
+				Key:        oss.Ptr(token.ObjectPath),
+				UploadId:   uploadInfo.UploadId,
+				PartNumber: partNumber,
+				Body:       body,
+			})
+			_ = body.Close()
+			if err == nil {
+				return oss.UploadPart{
+					PartNumber: partNumber,
+					ETag:       res.ETag,
+				}, nil
+			}
+		}
+		if !shouldRetryMultipartPart(ctx, err) || try == maxRetries {
+			break
+		}
+		fs.Debugf(src, "Retrying multipart part %d after error: %v - low level retry %d/%d", partNumber, err, try+1, maxRetries)
+		select {
+		case <-ctx.Done():
+			return oss.UploadPart{}, ctx.Err()
+		case <-time.After(uploadPartRetryDelay(try)):
+		}
+	}
+	if fserrors.ContextError(ctx, &err) {
+		return oss.UploadPart{}, err
+	}
+	return oss.UploadPart{}, fmt.Errorf("failed to upload multipart part %d at offset %d size %d: %w", partNumber, offset, size, err)
+}
+
+func shouldRetryMultipartPart(ctx context.Context, err error) bool {
+	if fserrors.ContextError(ctx, &err) {
+		return false
+	}
+	if fserrors.ShouldRetry(err) {
+		return true
+	}
+	var opErr *oss.OperationError
+	if errors.As(err, &opErr) {
+		err = opErr.Unwrap()
+	}
+	var serviceErr *oss.ServiceError
+	if errors.As(err, &serviceErr) {
+		switch serviceErr.StatusCode {
+		case 408, 429, 500, 502, 503, 504:
+			return true
+		}
+	}
+	return false
+}
+
+func uploadPartRetryDelay(try int) time.Duration {
+	delay := time.Second << min(try, 4)
+	return delay
 }
 
 func (f *Fs) multipartUploadFromReader(ctx context.Context, client *oss.Client, token *uploadTokenData, in io.Reader, src fs.ObjectInfo, acc *accounting.Account, transfer *accounting.Transfer, options ...fs.OpenOption) error {
