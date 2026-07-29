@@ -182,13 +182,21 @@ func (f *Fs) getUploadToken(ctx context.Context, parentID, name string, size int
 }
 
 func (f *Fs) waitUploadTaskInfo(ctx context.Context, taskID string) error {
-	const (
-		maxTry   = 300
-		interval = time.Second
-	)
-	for i := 0; i < maxTry; i++ {
+	const interval = time.Second
+	deadline := time.Now().Add(uploadTaskWaitDuration(ctx))
+	for {
 		var out taskInfoResp
 		if err := f.postAPI(ctx, "/nd.bizuserres.s/v1/file/get_info_by_task_id", map[string]any{"taskId": taskID}, &out); err != nil {
+			if fserrors.ContextError(ctx, &err) {
+				return err
+			}
+			if fserrors.ShouldRetry(err) && time.Now().Before(deadline) {
+				fs.Debugf(f, "Retrying upload task %s status after error: %v", taskID, err)
+				if err = sleepUntilNextUploadTaskPoll(ctx, interval); err != nil {
+					return err
+				}
+				continue
+			}
 			return err
 		}
 		if out.Data.FileID != "" {
@@ -201,16 +209,34 @@ func (f *Fs) waitUploadTaskInfo(ctx context.Context, taskID string) error {
 				return fmt.Errorf("upload task failed: code=%d msg=%s", out.Code, strings.TrimSpace(out.Msg))
 			}
 		}
-		if i == maxTry-1 {
+		if !time.Now().Before(deadline) {
 			break
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(interval):
+		if err := sleepUntilNextUploadTaskPoll(ctx, interval); err != nil {
+			return err
 		}
 	}
 	return fmt.Errorf("upload task %s timeout", taskID)
+}
+
+func uploadTaskWaitDuration(ctx context.Context) time.Duration {
+	const minWait = 30 * time.Minute
+	wait := minWait
+	if ci := fs.GetConfig(ctx); ci != nil {
+		if timeout := ci.TimeoutOrInfinite(); timeout > wait && timeout < fs.ModTimeNotSupported {
+			wait = timeout
+		}
+	}
+	return wait
+}
+
+func sleepUntilNextUploadTaskPoll(ctx context.Context, interval time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(interval):
+		return nil
+	}
 }
 
 func (f *Fs) newOSSClient(token *uploadTokenData) (*oss.Client, error) {
