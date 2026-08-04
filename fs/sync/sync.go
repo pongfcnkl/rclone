@@ -520,11 +520,10 @@ func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs,
 			if src == nil {
 				continue
 			}
-			// 使用源文件系统的 Fs 接口
-			srcFs := s.fsrc
-			err := operations.CopyFile(ctx, fdst, srcFs, src.Remote(), src.Remote())
+			_, err := operations.Copy(ctx, fdst, pair.Dst, src.Remote(), src)
 			if err != nil {
 				s.processError(err)
+				s.logger(s.ctx, operations.TransferError, src, pair.Dst, err)
 				continue
 			}
 			if s.copyCallback != nil {
