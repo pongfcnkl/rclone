@@ -308,6 +308,9 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	}
 	a, err := f.findAlbumByName(ctx, dir)
 	if err != nil {
+		if errors.Is(err, fs.ErrorDirNotFound) {
+			return nil, fs.ErrorObjectNotFound
+		}
 		return nil, err
 	}
 	item, err := f.findAlbumFileByName(ctx, a, leaf)

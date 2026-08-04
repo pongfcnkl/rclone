@@ -117,6 +117,11 @@ func (f *Fs) upload(ctx context.Context, in io.Reader, src fs.ObjectInfo, option
 	if err != nil {
 		return err
 	}
+	if targetAlbum != nil {
+		fs.Debugf(src, "baidu_photo: uploading to album %q (%s) as %q", targetAlbum.Title, targetAlbum.AlbumID, filename)
+	} else {
+		fs.Debugf(src, "baidu_photo: uploading to root as %q", filename)
+	}
 	rootPath := "/" + f.opt.Enc.FromStandardName(filename)
 	precreate, err := f.apiPrecreate(ctx, rootPath, src.Size(), hashes)
 	if err != nil {
