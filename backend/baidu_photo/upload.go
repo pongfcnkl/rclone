@@ -279,7 +279,7 @@ func (f *Fs) apiCreate(ctx context.Context, rootPath string, size int64, uploadI
 	form := url.Values{
 		"autoinit":   {"1"},
 		"isdir":      {"0"},
-		"rtype":      {"1"},
+		"rtype":      {"3"},
 		"ctype":      {"11"},
 		"path":       {rootPath},
 		"size":       {strconv.FormatInt(size, 10)},
@@ -291,6 +291,7 @@ func (f *Fs) apiCreate(ctx context.Context, rootPath string, size int64, uploadI
 	if out == nil {
 		out = &precreateResp{}
 	}
+	fs.Debugf(f, "baidu_photo create request: path=%q size=%d uploadid=%q block_list=%s", rootPath, size, uploadID, blockList)
 	_, err := f.call(ctx, http.MethodPost, fileAPIURLV1+"/create", url.Values{"bdstoken": {f.bdstoken}}, form, out)
 	return err
 }
