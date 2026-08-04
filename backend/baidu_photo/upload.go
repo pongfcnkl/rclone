@@ -164,9 +164,20 @@ func (f *Fs) uploadTarget(ctx context.Context, remote string) (*album, string, e
 	if strings.Contains(dir, "/") {
 		return nil, "", fs.ErrorCantDirMove
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	a, err := f.findAlbumByName(ctx, dir)
 	if err != nil {
-		return nil, "", err
+		if !errors.Is(err, fs.ErrorDirNotFound) {
+			return nil, "", err
+		}
+		a, err = f.apiCreateAlbum(ctx, f.opt.Enc.FromStandardName(dir))
+		if err != nil {
+			if found, findErr := f.findAlbumByName(ctx, dir); findErr == nil {
+				return found, leaf, nil
+			}
+			return nil, "", err
+		}
 	}
 	return a, leaf, nil
 }
