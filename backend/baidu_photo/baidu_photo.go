@@ -145,29 +145,28 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if root == "" {
 		return f, nil
 	}
-	item, err := f.NewObject(ctx, root)
-	if err == nil {
-		parent := path.Dir(root)
-		if parent == "." {
-			parent = ""
-		}
-		tempF := *f
-		tempF.root = parent
-		return &tempF, fs.ErrorIsFile
-	}
 	if _, dirErr := f.findAlbumByName(ctx, root); dirErr == nil {
 		f.root = root
 		return f, nil
 	}
+	if f.opt.ShowType != "root_only_album" {
+		item, err := f.NewObject(ctx, root)
+		if err == nil {
+			parent := path.Dir(root)
+			if parent == "." {
+				parent = ""
+			}
+			tempF := *f
+			tempF.root = parent
+			return &tempF, fs.ErrorIsFile
+		}
+		if !errors.Is(err, fs.ErrorObjectNotFound) && !errors.Is(err, fs.ErrorDirNotFound) {
+			_ = item
+			return nil, err
+		}
+	}
 	f.root = root
-	if errors.Is(err, fs.ErrorObjectNotFound) {
-		return f, nil
-	}
-	if errors.Is(err, fs.ErrorDirNotFound) {
-		return f, nil
-	}
-	_ = item
-	return nil, err
+	return f, nil
 }
 
 func initShowType(opt *Options) {
