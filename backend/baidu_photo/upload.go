@@ -176,7 +176,7 @@ func (f *Fs) uploadTarget(ctx context.Context, remote string) (*album, string, e
 			if found, findErr := f.findAlbumByName(ctx, dir); findErr == nil {
 				return found, leaf, nil
 			}
-			return nil, "", err
+			return nil, "", fmt.Errorf("baidu_photo: failed to create upload album %q: %w", dir, err)
 		}
 	}
 	return a, leaf, nil

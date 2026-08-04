@@ -211,7 +211,21 @@ func (f *Fs) apiCreateAlbum(ctx context.Context, name string) (*album, error) {
 	if err != nil {
 		return nil, err
 	}
-	return f.apiAlbumDetail(ctx, resp.AlbumID)
+	if resp.AlbumID != "" {
+		a, err := f.apiAlbumDetail(ctx, resp.AlbumID)
+		if err == nil {
+			return a, nil
+		}
+		fs.Debugf(f, "baidu_photo: album detail lookup failed after create: album_id=%q title=%q: %v", resp.AlbumID, name, err)
+	}
+	a, err := f.findAlbumByTitle(ctx, name)
+	if err == nil {
+		return a, nil
+	}
+	if resp.AlbumID == "" {
+		return nil, fmt.Errorf("baidu_photo: created album %q but response did not include album_id", name)
+	}
+	return nil, err
 }
 
 func (f *Fs) apiDeleteAlbum(ctx context.Context, a *album) error {

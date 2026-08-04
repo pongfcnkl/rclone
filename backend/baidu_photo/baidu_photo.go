@@ -349,7 +349,10 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 		return nil
 	}
 	_, err := f.apiCreateAlbum(ctx, f.opt.Enc.FromStandardName(dir))
-	return err
+	if err != nil {
+		return fmt.Errorf("baidu_photo: failed to create album %q: %w", dir, err)
+	}
+	return nil
 }
 
 func (f *Fs) Rmdir(ctx context.Context, dir string) error {
@@ -408,13 +411,16 @@ func (f *Fs) findRootFileByName(ctx context.Context, name string) (*file, error)
 }
 
 func (f *Fs) findAlbumByName(ctx context.Context, name string) (*album, error) {
+	return f.findAlbumByTitle(ctx, f.opt.Enc.FromStandardName(name))
+}
+
+func (f *Fs) findAlbumByTitle(ctx context.Context, title string) (*album, error) {
 	albums, err := f.apiAllAlbums(ctx)
 	if err != nil {
 		return nil, err
 	}
-	want := f.opt.Enc.FromStandardName(name)
 	for _, a := range albums {
-		if a.Title == want || a.AlbumID == name {
+		if a.Title == title || a.AlbumID == title {
 			found := a
 			return &found, nil
 		}
