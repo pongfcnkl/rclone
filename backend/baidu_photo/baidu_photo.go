@@ -237,6 +237,9 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 	}
 	a, err := f.findAlbumByName(ctx, lookupDir)
 	if err != nil {
+		if userDir == "" && f.root != "" && errors.Is(err, fs.ErrorDirNotFound) {
+			return fs.DirEntries{}, nil
+		}
 		return nil, err
 	}
 	files, err := f.apiAlbumFiles(ctx, a)
