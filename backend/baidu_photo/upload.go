@@ -123,7 +123,8 @@ func (f *Fs) upload(ctx context.Context, in io.Reader, src fs.ObjectInfo, option
 		fs.Debugf(src, "baidu_photo: uploading to root as %q", filename)
 	}
 	rootPath := "/" + f.opt.Enc.FromStandardName(filename)
-	precreate, err := f.apiPrecreate(ctx, rootPath, src.Size(), hashes)
+	modTime := src.ModTime(ctx).Unix()
+	precreate, err := f.apiPrecreate(ctx, rootPath, src.Size(), hashes, modTime, modTime)
 	if err != nil {
 		return err
 	}
@@ -134,7 +135,7 @@ func (f *Fs) upload(ctx context.Context, in io.Reader, src fs.ObjectInfo, option
 		}
 		fallthrough
 	case 2:
-		if err = f.apiCreate(ctx, rootPath, src.Size(), precreate.UploadID, hashes.blockListStr, precreate); err != nil {
+		if err = f.apiCreate(ctx, rootPath, src.Size(), precreate.UploadID, hashes.blockListStr, modTime, modTime, precreate); err != nil {
 			return err
 		}
 		fallthrough
@@ -255,11 +256,11 @@ func computeUploadHashes(ctx context.Context, source *reopenableSource, size int
 	}, nil
 }
 
-func (f *Fs) apiPrecreate(ctx context.Context, rootPath string, size int64, hashes *uploadHashes) (*precreateResp, error) {
+func (f *Fs) apiPrecreate(ctx context.Context, rootPath string, size int64, hashes *uploadHashes, mtime, ctime int64) (*precreateResp, error) {
 	form := url.Values{
 		"autoinit":    {"1"},
 		"isdir":       {"0"},
-		"rtype":       {"1"},
+		"rtype":       {"3"},
 		"ctype":       {"11"},
 		"path":        {rootPath},
 		"size":        {strconv.FormatInt(size, 10)},
@@ -267,6 +268,11 @@ func (f *Fs) apiPrecreate(ctx context.Context, rootPath string, size int64, hash
 		"content-md5": {hashes.contentMD5},
 		"block_list":  {hashes.blockListStr},
 	}
+	if mtime > 0 {
+		form.Set("local_mtime", strconv.FormatInt(mtime, 10))
+		form.Set("local_ctime", strconv.FormatInt(ctime, 10))
+	}
+	fs.Debugf(f, "baidu_photo precreate request: path=%q size=%d content_md5=%q slice_md5=%q block_list=%s", rootPath, size, hashes.contentMD5, hashes.sliceMD5, hashes.blockListStr)
 	var resp precreateResp
 	_, err := f.call(ctx, http.MethodPost, fileAPIURLV1+"/precreate", url.Values{"bdstoken": {f.bdstoken}}, form, &resp)
 	if err != nil {
@@ -275,7 +281,7 @@ func (f *Fs) apiPrecreate(ctx context.Context, rootPath string, size int64, hash
 	return &resp, nil
 }
 
-func (f *Fs) apiCreate(ctx context.Context, rootPath string, size int64, uploadID, blockList string, out *precreateResp) error {
+func (f *Fs) apiCreate(ctx context.Context, rootPath string, size int64, uploadID, blockList string, mtime, ctime int64, out *precreateResp) error {
 	form := url.Values{
 		"autoinit":   {"1"},
 		"isdir":      {"0"},
@@ -287,6 +293,10 @@ func (f *Fs) apiCreate(ctx context.Context, rootPath string, size int64, uploadI
 	}
 	if uploadID != "" {
 		form.Set("uploadid", uploadID)
+	}
+	if mtime > 0 {
+		form.Set("local_mtime", strconv.FormatInt(mtime, 10))
+		form.Set("local_ctime", strconv.FormatInt(ctime, 10))
 	}
 	if out == nil {
 		out = &precreateResp{}
