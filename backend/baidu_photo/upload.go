@@ -36,7 +36,6 @@ type reopenableSource struct {
 type uploadHashes struct {
 	contentMD5   string
 	sliceMD5     string
-	blockList    []string
 	blockListStr string
 }
 
@@ -123,19 +122,18 @@ func (f *Fs) upload(ctx context.Context, in io.Reader, src fs.ObjectInfo, option
 		fs.Debugf(src, "baidu_photo: uploading to root as %q", filename)
 	}
 	rootPath := "/" + f.opt.Enc.FromStandardName(filename)
-	modTime := src.ModTime(ctx).Unix()
-	precreate, err := f.apiPrecreate(ctx, rootPath, src.Size(), hashes, modTime, modTime)
+	precreate, err := f.apiPrecreate(ctx, rootPath, src.Size(), hashes)
 	if err != nil {
 		return err
 	}
 	switch precreate.ReturnType {
 	case 1:
-		if err = f.uploadMissingBlocks(ctx, source, acc, transfer, src, rootPath, precreate, hashes, options...); err != nil {
+		if err = f.uploadMissingBlocks(ctx, source, acc, transfer, src, rootPath, precreate, options...); err != nil {
 			return err
 		}
 		fallthrough
 	case 2:
-		if err = f.apiCreate(ctx, rootPath, src.Size(), precreate.UploadID, hashes.blockListStr, modTime, modTime, precreate); err != nil {
+		if err = f.apiCreate(ctx, rootPath, src.Size(), precreate.UploadID, hashes, precreate); err != nil {
 			return err
 		}
 		fallthrough
@@ -251,16 +249,15 @@ func computeUploadHashes(ctx context.Context, source *reopenableSource, size int
 	return &uploadHashes{
 		contentMD5:   hex.EncodeToString(fileMD5.Sum(nil)),
 		sliceMD5:     hex.EncodeToString(firstSliceMD5.Sum(nil)),
-		blockList:    blocks,
 		blockListStr: string(blockJSON),
 	}, nil
 }
 
-func (f *Fs) apiPrecreate(ctx context.Context, rootPath string, size int64, hashes *uploadHashes, mtime, ctime int64) (*precreateResp, error) {
-	form := url.Values{
+func newUploadForm(rootPath string, size int64, hashes *uploadHashes) url.Values {
+	return url.Values{
 		"autoinit":    {"1"},
 		"isdir":       {"0"},
-		"rtype":       {"3"},
+		"rtype":       {"1"},
 		"ctype":       {"11"},
 		"path":        {rootPath},
 		"size":        {strconv.FormatInt(size, 10)},
@@ -268,10 +265,16 @@ func (f *Fs) apiPrecreate(ctx context.Context, rootPath string, size int64, hash
 		"content-md5": {hashes.contentMD5},
 		"block_list":  {hashes.blockListStr},
 	}
-	if mtime > 0 {
-		form.Set("local_mtime", strconv.FormatInt(mtime, 10))
-		form.Set("local_ctime", strconv.FormatInt(ctime, 10))
-	}
+}
+
+func newCreateForm(rootPath string, size int64, uploadID string, hashes *uploadHashes) url.Values {
+	form := newUploadForm(rootPath, size, hashes)
+	form.Set("uploadid", uploadID)
+	return form
+}
+
+func (f *Fs) apiPrecreate(ctx context.Context, rootPath string, size int64, hashes *uploadHashes) (*precreateResp, error) {
+	form := newUploadForm(rootPath, size, hashes)
 	fs.Debugf(f, "baidu_photo precreate request: path=%q size=%d content_md5=%q slice_md5=%q block_list=%s", rootPath, size, hashes.contentMD5, hashes.sliceMD5, hashes.blockListStr)
 	var resp precreateResp
 	_, err := f.call(ctx, http.MethodPost, fileAPIURLV1+"/precreate", url.Values{"bdstoken": {f.bdstoken}}, form, &resp)
@@ -281,32 +284,17 @@ func (f *Fs) apiPrecreate(ctx context.Context, rootPath string, size int64, hash
 	return &resp, nil
 }
 
-func (f *Fs) apiCreate(ctx context.Context, rootPath string, size int64, uploadID, blockList string, mtime, ctime int64, out *precreateResp) error {
-	form := url.Values{
-		"autoinit":   {"1"},
-		"isdir":      {"0"},
-		"rtype":      {"3"},
-		"ctype":      {"11"},
-		"path":       {rootPath},
-		"size":       {strconv.FormatInt(size, 10)},
-		"block_list": {blockList},
-	}
-	if uploadID != "" {
-		form.Set("uploadid", uploadID)
-	}
-	if mtime > 0 {
-		form.Set("local_mtime", strconv.FormatInt(mtime, 10))
-		form.Set("local_ctime", strconv.FormatInt(ctime, 10))
-	}
+func (f *Fs) apiCreate(ctx context.Context, rootPath string, size int64, uploadID string, hashes *uploadHashes, out *precreateResp) error {
+	form := newCreateForm(rootPath, size, uploadID, hashes)
 	if out == nil {
 		out = &precreateResp{}
 	}
-	fs.Debugf(f, "baidu_photo create request: path=%q size=%d uploadid=%q block_list=%s", rootPath, size, uploadID, blockList)
+	fs.Debugf(f, "baidu_photo create request: path=%q size=%d uploadid=%q content_md5=%q slice_md5=%q block_list=%s", rootPath, size, uploadID, hashes.contentMD5, hashes.sliceMD5, hashes.blockListStr)
 	_, err := f.call(ctx, http.MethodPost, fileAPIURLV1+"/create", url.Values{"bdstoken": {f.bdstoken}}, form, out)
 	return err
 }
 
-func (f *Fs) uploadMissingBlocks(ctx context.Context, source *reopenableSource, acc *accounting.Account, transfer *accounting.Transfer, src fs.ObjectInfo, rootPath string, precreate *precreateResp, hashes *uploadHashes, options ...fs.OpenOption) error {
+func (f *Fs) uploadMissingBlocks(ctx context.Context, source *reopenableSource, acc *accounting.Account, transfer *accounting.Transfer, src fs.ObjectInfo, rootPath string, precreate *precreateResp, options ...fs.OpenOption) error {
 	var progressAcc *accounting.Account
 	for _, part := range precreate.BlockList {
 		offset := int64(part) * uploadPartSize
@@ -333,16 +321,10 @@ func (f *Fs) uploadMissingBlocks(ctx context.Context, source *reopenableSource, 
 		if closer, ok := bodyReader.(io.Closer); ok {
 			closeReader = closer
 		}
-		md5sum, err := f.uploadSlice(ctx, rootPath, precreate.UploadID, part, path.Base(rootPath), bodyReader, size, options)
+		_, err = f.uploadSlice(ctx, rootPath, precreate.UploadID, part, path.Base(rootPath), bodyReader, size, options)
 		_ = closeReader.Close()
 		if err != nil {
 			return err
-		}
-		if md5sum != "" && part >= 0 && part < len(hashes.blockList) {
-			hashes.blockList[part] = md5sum
-			if blockJSON, err := json.Marshal(hashes.blockList); err == nil {
-				hashes.blockListStr = string(blockJSON)
-			}
 		}
 	}
 	return nil
