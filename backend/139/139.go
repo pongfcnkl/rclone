@@ -25,9 +25,11 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rclone/rclone/fs"
@@ -40,6 +42,7 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/dircache"
 	"github.com/rclone/rclone/lib/encoder"
+	"github.com/rclone/rclone/lib/kv"
 	"github.com/rclone/rclone/lib/pacer"
 )
 
@@ -54,12 +57,16 @@ const (
 
 	defaultPartSize = 100 * fs.Mebi
 	largePartSize   = 512 * fs.Mebi
+	uploadStateTTL  = 24 * time.Hour
 	minSleep        = 100 * time.Millisecond
 	maxSleep        = 2 * time.Second
 	decayConstant   = 2
 )
 
-var retryErrorCodes = []int{429, 500, 502, 503, 504}
+var (
+	retryErrorCodes     = []int{408, 429, 500, 502, 503, 504}
+	errUploadURLExpired = errors.New("139: upload URL expired")
+)
 
 func init() {
 	fs.Register(&fs.RegInfo{
@@ -138,6 +145,7 @@ type Fs struct {
 	dirCache     *dircache.DirCache
 	pacer        *fs.Pacer
 	srv          *http.Client
+	uploadState  uploadProgressStore
 
 	mu                sync.Mutex
 	account           string
@@ -162,6 +170,18 @@ type baseResp struct {
 	Success bool   `json:"success"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type personalAPIError struct {
+	Code    string
+	Message string
+}
+
+func (e *personalAPIError) Error() string {
+	if e.Code == "" {
+		return e.Message
+	}
+	return fmt.Sprintf("139: API error %s: %s", e.Code, e.Message)
 }
 
 type personalThumbnail struct {
@@ -278,6 +298,13 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		CanHaveEmptyDirectories: true,
 		NoMultiThreading:        true,
 	}).Fill(ctx, f)
+	if kv.Supported() {
+		db, err := kv.Start(ctx, "139-upload", f)
+		if err != nil {
+			return nil, err
+		}
+		f.uploadState = &kvUploadProgressStore{db: db}
+	}
 
 	if err := f.init(ctx); err != nil {
 		return nil, err
@@ -327,13 +354,13 @@ func (f *Fs) init(ctx context.Context) error {
 	return nil
 }
 
-func (f *Fs) Name() string          { return f.name }
-func (f *Fs) Root() string          { return f.root }
-func (f *Fs) String() string        { return fmt.Sprintf("139 %s", f.root) }
-func (f *Fs) Features() *fs.Features { return f.features }
+func (f *Fs) Name() string             { return f.name }
+func (f *Fs) Root() string             { return f.root }
+func (f *Fs) String() string           { return fmt.Sprintf("139 %s", f.root) }
+func (f *Fs) Features() *fs.Features   { return f.features }
 func (f *Fs) Precision() time.Duration { return time.Millisecond }
-func (f *Fs) Hashes() hash.Set      { return hash.Set(hash.None) }
-func (f *Fs) DirCacheFlush()        { f.dirCache.ResetRoot() }
+func (f *Fs) Hashes() hash.Set         { return hash.Set(hash.None) }
+func (f *Fs) DirCacheFlush()           { f.dirCache.ResetRoot() }
 
 func (f *Fs) FindLeaf(ctx context.Context, pathID, leaf string) (string, bool, error) {
 	var foundID string
@@ -482,7 +509,7 @@ func (f *Fs) putUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 	if err != nil {
 		return nil, err
 	}
-	if err = o.upload(ctx, baseIn, wrap, src, leaf, dirID); err != nil {
+	if err = o.upload(ctx, baseIn, wrap, src, leaf, dirID, nil); err != nil {
 		return nil, err
 	}
 	f.dirCache.FlushDir(path.Dir(remote))
@@ -868,7 +895,7 @@ func (f *Fs) callJSON(ctx context.Context, method, endpoint string, payload any,
 		if check.Message == "" {
 			check.Message = string(data)
 		}
-		return nil, errors.New(check.Message)
+		return nil, &personalAPIError{Code: check.Code, Message: check.Message}
 	}
 	if out != nil {
 		if err = json.Unmarshal(data, out); err != nil {
@@ -955,12 +982,33 @@ func shouldRetry(resp *http.Response, err error) (bool, error) {
 func (f *Fs) do(req *http.Request, retry func(*http.Response, error) (bool, error)) (*http.Response, error) {
 	var resp *http.Response
 	var err error
+	attempt := 0
 	err = f.pacer.Call(func() (bool, error) {
+		if attempt > 0 && req.Body != nil {
+			if req.GetBody == nil {
+				return false, errors.New("139: request body cannot be replayed")
+			}
+			req.Body, err = req.GetBody()
+			if err != nil {
+				return false, err
+			}
+		}
+		attempt++
 		resp, err = f.srv.Do(req)
 		if retry == nil {
+			if err != nil && resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
 			return false, err
 		}
 		again, retryErr := retry(resp, err)
+		if again && resp != nil && resp.Body != nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+		if !again && retryErr != nil && resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		if retryErr == nil && resp != nil && resp.StatusCode >= 400 && !again {
 			body, _ := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
@@ -1054,26 +1102,220 @@ func tempFileWithSHA256(in io.Reader) (*os.File, int64, string, error) {
 	return file, n, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func (o *Object) prepareUploadSource(ctx context.Context, in io.Reader, src fs.ObjectInfo) (string, io.Reader, func(), error) {
-	if srcObj, ok := src.(fs.Object); ok {
-		hashReader, err := srcObj.Open(ctx)
-		if err == nil {
-			hasher := sha256.New()
-			if _, err = io.Copy(hasher, hashReader); err != nil {
-				_ = hashReader.Close()
-				return "", nil, nil, err
-			}
-			if err = hashReader.Close(); err != nil {
-				return "", nil, nil, err
-			}
-			uploadReader, err := srcObj.Open(ctx)
-			if err == nil {
-				return hex.EncodeToString(hasher.Sum(nil)), uploadReader, func() { _ = uploadReader.Close() }, nil
+type uploadSource struct {
+	openRange func(context.Context, int64, int64) (io.ReadCloser, error)
+}
+
+const uploadStateVersion = 1
+
+type uploadProgress struct {
+	Version     int    `json:"version"`
+	FileID      string `json:"file_id"`
+	UploadID    string `json:"upload_id"`
+	Pending     []int  `json:"pending"`
+	PartSize    int64  `json:"part_size"`
+	Size        int64  `json:"size"`
+	ContentHash string `json:"content_hash"`
+	ParentID    string `json:"parent_id"`
+	EncodedName string `json:"encoded_name"`
+	Account     string `json:"account"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
+type uploadProgressStore interface {
+	Load(string) (*uploadProgress, error)
+	Save(string, *uploadProgress) error
+}
+
+type kvUploadProgressStore struct {
+	db *kv.DB
+}
+
+type getUploadProgress struct {
+	key string
+	out **uploadProgress
+}
+
+func (op *getUploadProgress) Do(ctx context.Context, bucket kv.Bucket) error {
+	data := bucket.Get([]byte(op.key))
+	if len(data) == 0 {
+		return nil
+	}
+	var state uploadProgress
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+	*op.out = &state
+	return nil
+}
+
+type putUploadProgress struct {
+	key   string
+	state *uploadProgress
+}
+
+func (op *putUploadProgress) Do(ctx context.Context, bucket kv.Bucket) error {
+	if op.state == nil {
+		return bucket.Delete([]byte(op.key))
+	}
+	data, err := json.Marshal(op.state)
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(op.key), data)
+}
+
+func (s *kvUploadProgressStore) Load(key string) (*uploadProgress, error) {
+	var state *uploadProgress
+	err := s.db.Do(false, &getUploadProgress{key: key, out: &state})
+	if errors.Is(err, kv.ErrEmpty) {
+		return nil, nil
+	}
+	return state, err
+}
+
+func (s *kvUploadProgressStore) Save(key string, state *uploadProgress) error {
+	return s.db.Do(true, &putUploadProgress{key: key, state: state})
+}
+
+func (f *Fs) loadUploadProgress(key string) (*uploadProgress, error) {
+	if f.uploadState == nil {
+		return nil, nil
+	}
+	return f.uploadState.Load(key)
+}
+
+func (f *Fs) saveUploadProgress(key string, state *uploadProgress) error {
+	if f.uploadState == nil {
+		return nil
+	}
+	return f.uploadState.Save(key, state)
+}
+
+func (f *Fs) uploadProgressKey(parentID, encodedName, contentHash string) string {
+	identity := strings.Join([]string{f.originalName, f.account, parentID, encodedName, contentHash}, "\x00")
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:])
+}
+
+func (state *uploadProgress) matches(size, partSize int64, contentHash, parentID, encodedName, account string, totalParts int) bool {
+	if !state.identityMatches(size, partSize, contentHash, parentID, encodedName, account, totalParts) ||
+		state.UpdatedAt <= 0 ||
+		time.Since(time.Unix(state.UpdatedAt, 0)) > uploadStateTTL {
+		return false
+	}
+	return true
+}
+
+func (state *uploadProgress) identityMatches(size, partSize int64, contentHash, parentID, encodedName, account string, totalParts int) bool {
+	if state == nil ||
+		state.Version != uploadStateVersion ||
+		state.FileID == "" ||
+		state.UploadID == "" ||
+		state.Size != size ||
+		state.PartSize != partSize ||
+		state.ContentHash != contentHash ||
+		state.ParentID != parentID ||
+		state.EncodedName != encodedName ||
+		state.Account != account {
+		return false
+	}
+	seen := make(map[int]struct{}, len(state.Pending))
+	for _, partNumber := range state.Pending {
+		if partNumber < 1 || partNumber > totalParts {
+			return false
+		}
+		if _, found := seen[partNumber]; found {
+			return false
+		}
+		seen[partNumber] = struct{}{}
+	}
+	return true
+}
+
+func removePendingPart(parts []int, target int) []int {
+	for i, partNumber := range parts {
+		if partNumber == target {
+			return append(parts[:i], parts[i+1:]...)
+		}
+	}
+	return parts
+}
+
+func (s *uploadSource) OpenRange(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
+	return s.openRange(ctx, offset, size)
+}
+
+func newObjectUploadSource(ctx context.Context, src fs.ObjectInfo) (*uploadSource, error) {
+	type openable interface {
+		Open(context.Context, ...fs.OpenOption) (io.ReadCloser, error)
+	}
+
+	var open func(context.Context, ...fs.OpenOption) (io.ReadCloser, error)
+	if obj, ok := src.(openable); ok {
+		open = obj.Open
+	}
+	if open == nil {
+		if wrapped, ok := src.(*fs.OverrideRemote); ok {
+			if obj := wrapped.UnWrap(); obj != nil {
+				open = obj.Open
 			}
 		}
 	}
+	if open == nil {
+		return nil, fmt.Errorf("139: upload source is not reopenable (src=%T remote=%q)", src, src.Remote())
+	}
 
-	tmp, _, sha256hex, err := tempFileWithSHA256(in)
+	return &uploadSource{openRange: func(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
+		if size == 0 {
+			return io.NopCloser(strings.NewReader("")), nil
+		}
+		if size < 0 {
+			return open(ctx, &fs.RangeOption{Start: offset, End: -1})
+		}
+		return open(ctx, &fs.RangeOption{Start: offset, End: offset + size - 1})
+	}}, nil
+}
+
+func newTempUploadSource(file *os.File, totalSize int64) *uploadSource {
+	return &uploadSource{openRange: func(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if size < 0 {
+			size = totalSize - offset
+		}
+		if offset < 0 || offset > totalSize || size < 0 || size > totalSize-offset {
+			return nil, fmt.Errorf("139: invalid upload range offset=%d size=%d", offset, size)
+		}
+		return io.NopCloser(io.NewSectionReader(file, offset, size)), nil
+	}}
+}
+
+func (o *Object) prepareUploadSource(ctx context.Context, in io.Reader, src fs.ObjectInfo) (string, *uploadSource, func(), error) {
+	source, sourceErr := newObjectUploadSource(ctx, src)
+	if sourceErr == nil {
+		hashReader, openErr := source.OpenRange(ctx, 0, -1)
+		if openErr == nil {
+			hasher := sha256.New()
+			n, copyErr := io.Copy(hasher, hashReader)
+			closeErr := hashReader.Close()
+			if copyErr != nil {
+				return "", nil, nil, copyErr
+			}
+			if closeErr != nil {
+				return "", nil, nil, closeErr
+			}
+			if expected := src.Size(); expected >= 0 && n != expected {
+				return "", nil, nil, fmt.Errorf("139: upload source size changed: expected %d bytes, got %d", expected, n)
+			}
+			return hex.EncodeToString(hasher.Sum(nil)), source, func() {}, nil
+		}
+		sourceErr = openErr
+	}
+	fs.Debugf(src, "Using a temporary file for resumable upload: %v", sourceErr)
+
+	tmp, size, sha256hex, err := tempFileWithSHA256(in)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -1081,12 +1323,19 @@ func (o *Object) prepareUploadSource(ctx context.Context, in io.Reader, src fs.O
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 	}
-	return sha256hex, tmp, cleanup, nil
+	if expected := src.Size(); expected >= 0 && size != expected {
+		cleanup()
+		return "", nil, nil, fmt.Errorf("139: upload source size changed: expected %d bytes, got %d", expected, size)
+	}
+	return sha256hex, newTempUploadSource(tmp, size), cleanup, nil
 }
 
-func (o *Object) upload(ctx context.Context, in io.Reader, wrap accounting.WrapFn, src fs.ObjectInfo, leaf, parentID string) error {
+func (o *Object) upload(ctx context.Context, in io.Reader, wrap accounting.WrapFn, src fs.ObjectInfo, leaf, parentID string, existing *Object) error {
 	size := src.Size()
-	sha256hex, uploadReader, cleanup, err := o.prepareUploadSource(ctx, in, src)
+	if size < 0 {
+		return errors.New("139: upload requires a known size")
+	}
+	sha256hex, source, cleanup, err := o.prepareUploadSource(ctx, in, src)
 	if err != nil {
 		return err
 	}
@@ -1102,104 +1351,373 @@ func (o *Object) upload(ctx context.Context, in io.Reader, wrap accounting.WrapF
 		allParts = append(allParts, p)
 	}
 
-	firstBatch := allParts[:minInt(100, len(allParts))]
-	var create personalUploadResp
-	_, err = o.fs.personalCall(ctx, http.MethodPost, "/file/create", map[string]any{
-		"contentHash":          sha256hex,
-		"contentHashAlgorithm": "SHA256",
-		"contentType":          "application/octet-stream",
-		"parallelUpload":       false,
-		"partInfos":            firstBatch,
-		"size":                 size,
-		"parentFileId":         parentID,
-		"name":                 o.fs.opt.Enc.FromStandardName(leaf),
-		"type":                 "file",
-		"fileRenameMode":       "auto_rename",
-	}, &create)
+	encodedName := o.fs.opt.Enc.FromStandardName(leaf)
+	progressKey := o.fs.uploadProgressKey(parentID, encodedName, sha256hex)
+	state, err := o.fs.loadUploadProgress(progressKey)
 	if err != nil {
 		return err
 	}
-	if create.Data.Exist {
+	if existing != nil && state.identityMatches(size, partSize, sha256hex, parentID, encodedName, o.fs.account, totalParts) &&
+		len(state.Pending) == 0 && existing.ID() != "" && existing.ID() == state.FileID && existing.Size() == state.Size {
+		if err = o.fs.saveUploadProgress(progressKey, nil); err != nil {
+			return fmt.Errorf("139: clear completed upload checkpoint: %w", err)
+		}
+		fs.Debugf(src, "Upload %s was already completed; keeping the existing target", state.UploadID)
 		return nil
 	}
-	if len(create.Data.PartInfos) > 0 {
-		if err = uploadPartBatch(ctx, uploadReader, wrap, allParts, create.Data.PartInfos); err != nil {
+	if state != nil && !state.matches(size, partSize, sha256hex, parentID, encodedName, o.fs.account, totalParts) {
+		fs.Debugf(src, "Discarding incompatible 139 upload checkpoint")
+		if err = o.fs.saveUploadProgress(progressKey, nil); err != nil {
 			return err
 		}
-		for i := 100; i < len(allParts); i += 100 {
-			batch := allParts[i:minInt(i+100, len(allParts))]
+		state = nil
+	}
+	if existing != nil {
+		if state != nil {
+			if len(state.Pending) != 0 {
+				return fmt.Errorf("139: target exists while upload %s still has %d pending parts; refusing to delete it", state.UploadID, len(state.Pending))
+			}
+			return fmt.Errorf("139: completed upload checkpoint file %s (%d bytes) does not match existing target %s (%d bytes)", state.FileID, state.Size, existing.ID(), existing.Size())
+		}
+		if err = existing.Remove(ctx); err != nil {
+			return err
+		}
+	}
+
+	var initialParts []uploadPart
+	var initialInfos []personalPartInfo
+	if state == nil {
+		initialParts = allParts[:minInt(100, len(allParts))]
+		var create personalUploadResp
+		_, err = o.fs.personalCall(ctx, http.MethodPost, "/file/create", map[string]any{
+			"contentHash":          sha256hex,
+			"contentHashAlgorithm": "SHA256",
+			"contentType":          "application/octet-stream",
+			"parallelUpload":       false,
+			"partInfos":            initialParts,
+			"size":                 size,
+			"parentFileId":         parentID,
+			"name":                 encodedName,
+			"type":                 "file",
+			"fileRenameMode":       "auto_rename",
+		}, &create)
+		if err != nil {
+			return err
+		}
+		if create.Data.Exist || len(create.Data.PartInfos) == 0 {
+			if err = o.fs.saveUploadProgress(progressKey, nil); err != nil {
+				return fmt.Errorf("139: clear upload checkpoint after server-side completion: %w", err)
+			}
+			return nil
+		}
+		if create.Data.FileID == "" || create.Data.UploadID == "" {
+			return errors.New("139: create upload returned empty fileId or uploadId")
+		}
+		pending := make([]int, len(allParts))
+		for i := range allParts {
+			pending[i] = allParts[i].PartNumber
+		}
+		state = &uploadProgress{
+			Version:     uploadStateVersion,
+			FileID:      create.Data.FileID,
+			UploadID:    create.Data.UploadID,
+			Pending:     pending,
+			PartSize:    partSize,
+			Size:        size,
+			ContentHash: sha256hex,
+			ParentID:    parentID,
+			EncodedName: encodedName,
+			Account:     o.fs.account,
+			UpdatedAt:   time.Now().Unix(),
+		}
+		if err = o.fs.saveUploadProgress(progressKey, state); err != nil {
+			return err
+		}
+		initialInfos = create.Data.PartInfos
+	} else {
+		sort.Ints(state.Pending)
+		fs.Debugf(src, "Resuming 139 upload %s with %d/%d parts pending", state.UploadID, len(state.Pending), totalParts)
+	}
+
+	partDone := func(partNumber int) error {
+		state.Pending = removePendingPart(state.Pending, partNumber)
+		state.UpdatedAt = time.Now().Unix()
+		return o.fs.saveUploadProgress(progressKey, state)
+	}
+	for len(state.Pending) > 0 {
+		batchUsesFreshURLs := false
+		batch := initialParts
+		uploadInfos := initialInfos
+		initialParts = nil
+		initialInfos = nil
+		if batch == nil {
+			pending := state.Pending[:minInt(100, len(state.Pending))]
+			batch, err = uploadPartsByNumber(allParts, pending)
+			if err != nil {
+				return err
+			}
 			var more personalUploadURLResp
 			_, err = o.fs.personalCall(ctx, http.MethodPost, "/file/getUploadUrl", map[string]any{
-				"fileId":    create.Data.FileID,
-				"uploadId":  create.Data.UploadID,
+				"fileId":    state.FileID,
+				"uploadId":  state.UploadID,
 				"partInfos": batch,
+				"commonAccountInfo": map[string]any{
+					"account":     o.fs.account,
+					"accountType": 1,
+				},
 			}, &more)
 			if err != nil {
 				return err
 			}
-			if err = uploadPartBatch(ctx, uploadReader, wrap, allParts, more.Data.PartInfos); err != nil {
+			if more.Data.FileID != "" && more.Data.FileID != state.FileID {
+				return fmt.Errorf("139: upload URL response returned unexpected fileId %q", more.Data.FileID)
+			}
+			if more.Data.UploadID != "" && more.Data.UploadID != state.UploadID {
+				return fmt.Errorf("139: upload URL response returned unexpected uploadId %q", more.Data.UploadID)
+			}
+			uploadInfos = more.Data.PartInfos
+			batchUsesFreshURLs = true
+		}
+		err = o.uploadPartBatch(ctx, source, wrap, batch, uploadInfos, partDone)
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, errUploadURLExpired) && !batchUsesFreshURLs {
+			fs.Debugf(src, "Refreshing upload URLs for the remaining parts in upload %s", state.UploadID)
+			continue
+		}
+		if errors.Is(err, errUploadURLExpired) {
+			return o.invalidateRejectedUploadSession(ctx, progressKey, state, err)
+		}
+		return err
+	}
+
+	_, err = o.fs.personalCall(ctx, http.MethodPost, "/file/complete", map[string]any{
+		"contentHash":          sha256hex,
+		"contentHashAlgorithm": "SHA256",
+		"fileId":               state.FileID,
+		"uploadId":             state.UploadID,
+	}, nil)
+	if err != nil {
+		if ctx.Err() != nil || fserrors.IsRetryError(err) || fserrors.ShouldRetry(err) {
+			return err
+		}
+		if existing, findErr := o.fs.NewObject(ctx, o.remote); findErr == nil {
+			existingObject, ok := existing.(*Object)
+			if !ok || existingObject.ID() != state.FileID || existingObject.Size() != size {
 				return err
 			}
+			if clearErr := o.fs.saveUploadProgress(progressKey, nil); clearErr != nil {
+				return fmt.Errorf("139: clear completed upload checkpoint: %w", clearErr)
+			}
+			return nil
 		}
-		_, err = o.fs.personalCall(ctx, http.MethodPost, "/file/complete", map[string]any{
-			"contentHash":          sha256hex,
-			"contentHashAlgorithm": "SHA256",
-			"fileId":               create.Data.FileID,
-			"uploadId":             create.Data.UploadID,
-		}, nil)
-		if err != nil {
+		return err
+	}
+	if err = o.fs.saveUploadProgress(progressKey, nil); err != nil {
+		return fmt.Errorf("139: clear completed upload checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (o *Object) invalidateRejectedUploadSession(ctx context.Context, progressKey string, state *uploadProgress, sessionErr error) error {
+	if ctx.Err() != nil || fserrors.IsRetryError(sessionErr) || fserrors.ShouldRetry(sessionErr) {
+		return sessionErr
+	}
+	if err := o.fs.saveUploadProgress(progressKey, nil); err != nil {
+		return fmt.Errorf("139: upload session %s was rejected (%v) and its checkpoint could not be cleared: %w", state.UploadID, sessionErr, err)
+	}
+	return fserrors.RetryError(fmt.Errorf("139: upload session %s was rejected and will be recreated: %w", state.UploadID, sessionErr))
+}
+
+func uploadPartsByNumber(allParts []uploadPart, partNumbers []int) ([]uploadPart, error) {
+	parts := make([]uploadPart, 0, len(partNumbers))
+	for _, partNumber := range partNumbers {
+		idx := partNumber - 1
+		if idx < 0 || idx >= len(allParts) || allParts[idx].PartNumber != partNumber {
+			return nil, fmt.Errorf("139: invalid pending part number %d", partNumber)
+		}
+		parts = append(parts, allParts[idx])
+	}
+	return parts, nil
+}
+
+type accountingOnceReader struct {
+	raw       io.Reader
+	accounted io.Reader
+	offset    int64
+	maximum   *atomic.Int64
+}
+
+type readCloserWithReader struct {
+	io.Reader
+	io.Closer
+}
+
+// newAccountingOnceReader keeps retry traffic from inflating transfer progress.
+// Bytes already consumed by an earlier attempt bypass the accounting wrapper.
+func newAccountingOnceReader(in io.Reader, wrap accounting.WrapFn, maximum *atomic.Int64) io.Reader {
+	if wrap == nil {
+		wrap = func(r io.Reader) io.Reader { return r }
+	}
+	return &accountingOnceReader{
+		raw:       in,
+		accounted: wrap(in),
+		maximum:   maximum,
+	}
+}
+
+func (r *accountingOnceReader) Read(p []byte) (n int, err error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	maximum := r.maximum.Load()
+	if r.offset < maximum {
+		remaining := maximum - r.offset
+		if int64(len(p)) > remaining {
+			p = p[:remaining]
+		}
+		n, err = r.raw.Read(p)
+	} else {
+		n, err = r.accounted.Read(p)
+		end := r.offset + int64(n)
+		for maximum = r.maximum.Load(); end > maximum; maximum = r.maximum.Load() {
+			if r.maximum.CompareAndSwap(maximum, end) {
+				break
+			}
+		}
+	}
+	r.offset += int64(n)
+	return n, err
+}
+
+func (o *Object) uploadPartBatch(ctx context.Context, source *uploadSource, wrap accounting.WrapFn, expectedParts []uploadPart, uploadInfos []personalPartInfo, partDone func(int) error) error {
+	if len(uploadInfos) != len(expectedParts) {
+		return fmt.Errorf("139: upload URL response returned %d parts, expected %d", len(uploadInfos), len(expectedParts))
+	}
+	partsByNumber := make(map[int]uploadPart, len(expectedParts))
+	for _, part := range expectedParts {
+		if _, found := partsByNumber[part.PartNumber]; found {
+			return fmt.Errorf("139: duplicate expected part number %d", part.PartNumber)
+		}
+		partsByNumber[part.PartNumber] = part
+	}
+	infos := append([]personalPartInfo(nil), uploadInfos...)
+	sort.Slice(infos, func(i, j int) bool {
+		return infos[i].PartNumber < infos[j].PartNumber
+	})
+	seen := make(map[int]struct{}, len(infos))
+	for _, info := range infos {
+		part, expected := partsByNumber[info.PartNumber]
+		if !expected {
+			return fmt.Errorf("139: unexpected part number %d in upload URL response", info.PartNumber)
+		}
+		if _, found := seen[info.PartNumber]; found {
+			return fmt.Errorf("139: duplicate part number %d", info.PartNumber)
+		}
+		seen[info.PartNumber] = struct{}{}
+		if info.UploadURL == "" {
+			return fmt.Errorf("139: upload URL is empty for part %d", info.PartNumber)
+		}
+		if err := o.uploadPartFromSource(ctx, source, wrap, part, info); err != nil {
 			return err
+		}
+		if partDone != nil {
+			if err := partDone(info.PartNumber); err != nil {
+				return fmt.Errorf("139: save progress after part %d: %w", info.PartNumber, err)
+			}
 		}
 	}
 	return nil
 }
 
-func uploadPartBatch(ctx context.Context, in io.Reader, wrap accounting.WrapFn, allParts []uploadPart, uploadInfos []personalPartInfo) error {
-	currentPart := 0
-	if len(uploadInfos) > 0 {
-		currentPart = uploadInfos[0].PartNumber - 1
-	}
-	for _, info := range uploadInfos {
-		idx := info.PartNumber - 1
-		if idx < 0 || idx >= len(allParts) {
-			return fmt.Errorf("139: invalid part number %d", info.PartNumber)
+func (o *Object) uploadPartFromSource(ctx context.Context, source *uploadSource, wrap accounting.WrapFn, part uploadPart, info personalPartInfo) error {
+	var accounted atomic.Int64
+	err := o.fs.pacer.Call(func() (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
 		}
-		if idx != currentPart {
-			return fmt.Errorf("139: non-sequential part upload order: got %d expected %d", idx+1, currentPart+1)
-		}
-		part := allParts[idx]
-		section := io.LimitReader(in, part.PartSize)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, info.UploadURL, io.NopCloser(wrap(section)))
+		rc, err := source.OpenRange(ctx, part.ParallelHashCtx.PartOffset, part.PartSize)
 		if err != nil {
-			return err
+			partErr := fmt.Errorf("139: open upload part %d: %w", info.PartNumber, err)
+			retry, partErr := shouldRetryUploadPart(ctx, nil, partErr)
+			if retry {
+				fs.Debugf(o, "Retrying upload part %d after open error: %v", info.PartNumber, partErr)
+			}
+			return retry, partErr
+		}
+		section := io.LimitReader(rc, part.PartSize)
+		body := &readCloserWithReader{
+			Reader: newAccountingOnceReader(section, wrap, &accounted),
+			Closer: rc,
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, info.UploadURL, body)
+		if err != nil {
+			_ = rc.Close()
+			return false, err
 		}
 		req.ContentLength = part.PartSize
 		req.Header.Set("Content-Type", "application/octet-stream")
 		req.Header.Set("Origin", "https://yun.139.com")
 		req.Header.Set("Referer", "https://yun.139.com/")
-		resp, err := http.DefaultClient.Do(req)
+
+		resp, err := o.fs.srv.Do(req)
+		_ = req.Body.Close()
 		if err != nil {
-			return err
+			if resp != nil && resp.Body != nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+			partErr := fmt.Errorf("139: upload part %d: %w", info.PartNumber, err)
+			retry, partErr := shouldRetryUploadPart(ctx, resp, partErr)
+			if retry {
+				fs.Debugf(o, "Retrying upload part %d after error: %v", info.PartNumber, partErr)
+			}
+			return retry, partErr
 		}
-		body, readErr := io.ReadAll(resp.Body)
+
+		responseBody, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil {
-			return readErr
+			partErr := fmt.Errorf("139: read upload part %d response: %w", info.PartNumber, readErr)
+			retry, partErr := shouldRetryUploadPart(ctx, resp, partErr)
+			if retry {
+				fs.Debugf(o, "Retrying upload part %d after response error: %v", info.PartNumber, partErr)
+			}
+			return retry, partErr
 		}
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("139: upload part %d failed: %s", info.PartNumber, string(body))
+			partErr := fmt.Errorf("139: upload part %d failed: http %d: %s", info.PartNumber, resp.StatusCode, string(responseBody))
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				return false, fmt.Errorf("%w: %v", errUploadURLExpired, partErr)
+			}
+			retry, partErr := shouldRetryUploadPart(ctx, resp, partErr)
+			if retry {
+				fs.Debugf(o, "Retrying upload part %d after HTTP error: %v", info.PartNumber, partErr)
+			}
+			return retry, partErr
 		}
-		currentPart++
+		return false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("139: failed to upload part %d at offset %d size %d: %w", info.PartNumber, part.ParallelHashCtx.PartOffset, part.PartSize, err)
 	}
 	return nil
 }
 
-func (o *Object) Fs() fs.Info     { return o.fs }
-func (o *Object) String() string  { return o.remote }
-func (o *Object) Remote() string  { return o.remote }
-func (o *Object) Size() int64     { return o.size }
-func (o *Object) Storable() bool  { return true }
-func (o *Object) ID() string      { return o.id }
+func shouldRetryUploadPart(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	if fserrors.ContextError(ctx, &err) {
+		return false, err
+	}
+	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
+}
+
+func (o *Object) Fs() fs.Info    { return o.fs }
+func (o *Object) String() string { return o.remote }
+func (o *Object) Remote() string { return o.remote }
+func (o *Object) Size() int64    { return o.size }
+func (o *Object) Storable() bool { return true }
+func (o *Object) ID() string     { return o.id }
 
 func (o *Object) ModTime(ctx context.Context) time.Time {
 	if err := o.readMetaData(ctx); err != nil {
@@ -1246,14 +1764,20 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 }
 
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
-	if err := o.Remove(ctx); err != nil {
-		return err
-	}
-	newObj, err := o.fs.putUnchecked(ctx, in, src, src.Remote(), options...)
+	baseIn, wrap := accounting.UnWrap(in)
+	newObj, leaf, dirID, err := o.fs.createObject(ctx, src.Remote(), src.ModTime(ctx), src.Size())
 	if err != nil {
 		return err
 	}
-	*o = *(newObj.(*Object))
+	if err = newObj.upload(ctx, baseIn, wrap, src, leaf, dirID, o); err != nil {
+		return err
+	}
+	o.fs.dirCache.FlushDir(path.Dir(src.Remote()))
+	refreshed, err := o.fs.NewObject(ctx, src.Remote())
+	if err != nil {
+		return err
+	}
+	*o = *(refreshed.(*Object))
 	return nil
 }
 
